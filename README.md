@@ -7,9 +7,10 @@ de PDFs por IA, alertas de vencimiento y control de cobranzas.
 
 ```
 ┌─────────────────────┐      ┌───────────────────────┐      ┌──────────────────┐
-│   Streamlit (UI)     │─────▶│  pdf_extractor.py       │─────▶│  API de Claude     │
-│   app.py             │      │  (arma el prompt +     │      │  (lee el PDF y     │
-│                      │      │   llama a la API)       │      │   devuelve JSON)   │
+│   Streamlit (UI)     │─────▶│  pdf_extractor.py       │─────▶│  API de Gemini     │
+│   app.py             │      │  (arma el prompt +     │      │  (gratis, lee el   │
+│                      │      │   llama a la API)       │      │   PDF y devuelve   │
+│                      │      │                         │      │   JSON)            │
 └─────────┬────────────┘      └───────────────────────┘      └──────────────────┘
           │
           ▼
@@ -25,11 +26,18 @@ de PDFs por IA, alertas de vencimiento y control de cobranzas.
   multiusuario "de verdad" con roles, se migra a React + FastAPI, pero para
   un productor gestionando su propia cartera esto sobra y funciona muy bien.
 - **Lectura de PDFs:** en vez de un OCR clásico (Tesseract) + reglas, se usa
-  la API de Claude con "document" input: le mandás el PDF entero (nativo o
+  la API **gratuita** de Google Gemini: le mandás el PDF entero (nativo o
   escaneado) y te devuelve un JSON con los campos ya identificados. Esto es
-  más robusto que OCR + regex porque entiende el contexto ("esto es un
-  número de póliza", "esto es la vigencia hasta") aunque cada aseguradora
-  tenga un formato de póliza distinto.
+  más robusto que librerías como pypdf/pdfplumber porque esas solo extraen
+  texto plano (y no funcionan con pólizas escaneadas como imagen); Gemini
+  en cambio entiende el contexto ("esto es un número de póliza", "esto es
+  la vigencia hasta") aunque cada aseguradora tenga un formato distinto, y
+  no requiere tarjeta de crédito para la capa gratuita.
+  Límites de la capa gratuita (uso personal, sin costo): hasta ~250
+  pólizas por día con el modelo `gemini-2.5-flash`, que alcanza de sobra
+  para la carga normal de un productor. Si algún día necesitás más
+  volumen, alcanza con activar facturación en el mismo proyecto de Google
+  Cloud — el código no cambia.
 - **Base de datos:** SQLite para el MVP (un solo archivo, cero configuración).
   Cuando quieras acceso desde varios dispositivos o multiusuario, migrás a
   **Supabase** (Postgres gestionado, gratis hasta cierto volumen) — el código
@@ -95,7 +103,9 @@ de PDFs por IA, alertas de vencimiento y control de cobranzas.
 
 ### Requisitos
 - Python 3.10 o superior instalado.
-- Una API key de Anthropic (la sacás en https://console.anthropic.com/settings/keys).
+- Una API key **gratuita** de Google Gemini (sin tarjeta): la sacás en
+  https://aistudio.google.com/apikey con cualquier cuenta de Google, en
+  menos de dos minutos ("Get API key" → "Create API key").
 
 ### Pasos
 
@@ -113,7 +123,7 @@ pip install -r requirements.txt
 # 4. Configurar tu API key
 cp .env.example .env
 # Abrí el archivo .env y pegá tu API key real:
-# ANTHROPIC_API_KEY=sk-ant-tu-key-real
+# GOOGLE_API_KEY=AIzaSy-tu-key-real
 
 # 5. Levantar la app
 streamlit run app.py
@@ -131,7 +141,7 @@ SQLite se crea sola en `data/crm_seguros.db` la primera vez que corrés la app.
 3. "New app" → elegí el repo → archivo principal `app.py`.
 4. En "Advanced settings" → "Secrets", pegá:
    ```toml
-   ANTHROPIC_API_KEY = "sk-ant-tu-key-real"
+   GOOGLE_API_KEY = "AIzaSy-tu-key-real"
    ```
 5. Deploy. Te da una URL pública (o restringible por login) para acceder
    desde cualquier dispositivo.

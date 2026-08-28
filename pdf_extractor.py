@@ -1,18 +1,28 @@
 """
 pdf_extractor.py
-Envía el PDF de la póliza a la API de Claude (modelo con capacidad de
-lectura de documentos) y le pide que devuelva SOLO un JSON con los
-campos clave. No usamos OCR tradicional: el modelo lee el PDF directamente
-(funciona tanto con PDFs nativos como escaneados/imagen).
+Envía el PDF de la póliza a la API GRATUITA de Google Gemini y le pide
+que devuelva SOLO un JSON con los campos clave.
+
+Por qué Gemini y no una librería como pypdf/pdfplumber:
+- pypdf/pdfplumber solo extraen texto "tal cual" del PDF: no entienden
+  qué parte es el CUIT, cuál es la vigencia, etc. Además no funcionan
+  con pólizas escaneadas (imagen), que son muy comunes.
+- Gemini lee el PDF (texto o escaneado) y devuelve directamente los
+  campos identificados, igual que hacíamos antes con la API de Claude,
+  pero con una capa 100% gratuita (sin tarjeta) para uso personal.
+
+Conseguir la clave gratis en: https://aistudio.google.com/apikey
 """
 
-import base64
 import json
 import os
 
-import anthropic
+import google.generativeai as genai
 
-MODEL = "claude-sonnet-4-6"
+# Modelo gratuito recomendado (buena calidad + límite diario amplio).
+# Si en algún momento preferís más volumen diario a costa de algo menos
+# de precisión, se puede cambiar a "gemini-2.5-flash-lite".
+MODEL = "gemini-2.5-flash"
 
 SYSTEM_PROMPT = """Sos un asistente experto en pólizas de seguro argentinas.
 Vas a recibir el PDF de una póliza. Tu única tarea es extraer los datos
@@ -40,14 +50,23 @@ Si un dato no aparece en el documento o no estás seguro, devolvé null para ese
 No inventes datos."""
 
 
-def _get_client():
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
+def _get_model():
+    api_key = os.environ.get("GOOGLE_API_KEY")
     if not api_key:
         raise RuntimeError(
-            "No se encontró ANTHROPIC_API_KEY en las variables de entorno. "
-            "Configurala en el archivo .env"
+            "No se encontró GOOGLE_API_KEY en las variables de entorno. "
+            "Conseguí una clave gratis en https://aistudio.google.com/apikey "
+            "y configurala en el archivo .env (o en 'Secrets' si está en Streamlit Cloud)."
         )
-    return anthropic.Anthropic(api_key=api_key)
+    genai.configure(api_key=api_key)
+    return genai.GenerativeModel(
+        model_name=MODEL,
+        system_instruction=SYSTEM_PROMPT,
+        generation_config=genai.GenerationConfig(
+            response_mime_type="application/json",
+            temperature=0,
+        ),
+    )
 
 
 def extract_policy_data(pdf_bytes: bytes) -> dict:
@@ -56,39 +75,16 @@ def extract_policy_data(pdf_bytes: bytes) -> dict:
     los campos extraídos. Lanza excepción si la API falla o si la
     respuesta no es JSON válido.
     """
-    client = _get_client()
-    b64_pdf = base64.standard_b64encode(pdf_bytes).decode("utf-8")
+    model = _get_model()
 
-    message = client.messages.create(
-        model=MODEL,
-        max_tokens=1024,
-        system=SYSTEM_PROMPT,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "document",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "application/pdf",
-                            "data": b64_pdf,
-                        },
-                    },
-                    {
-                        "type": "text",
-                        "text": "Extraé los datos de esta póliza y devolvé solo el JSON.",
-                    },
-                ],
-            }
-        ],
+    response = model.generate_content(
+        [
+            {"mime_type": "application/pdf", "data": pdf_bytes},
+            "Extraé los datos de esta póliza y devolvé solo el JSON.",
+        ]
     )
 
-    raw_text = "".join(
-        block.text for block in message.content if block.type == "text"
-    ).strip()
-
-    # Por las dudas el modelo agregue fences de markdown, los limpiamos
+    raw_text = (response.text or "").strip()
     cleaned = raw_text.replace("```json", "").replace("```", "").strip()
 
     try:

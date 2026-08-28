@@ -54,10 +54,11 @@ pagina = st.sidebar.radio(
     ["📊 Dashboard", "📥 Cargar Póliza", "👥 Clientes", "💰 Cobranzas"],
 )
 
-if not os.environ.get("ANTHROPIC_API_KEY"):
+if not os.environ.get("GOOGLE_API_KEY"):
     st.sidebar.warning(
-        "⚠️ Falta configurar ANTHROPIC_API_KEY en el archivo .env "
-        "para poder usar la lectura automática de PDFs."
+        "⚠️ Falta configurar GOOGLE_API_KEY en el archivo .env "
+        "para poder usar la lectura automática de PDFs. "
+        "Conseguí una clave gratis en https://aistudio.google.com/apikey"
     )
 
 # ---------------------------------------------------------------------------
