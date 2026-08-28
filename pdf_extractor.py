@@ -20,9 +20,9 @@ import os
 import google.generativeai as genai
 
 # Modelo gratuito recomendado (buena calidad + límite diario amplio).
-# Si en algún momento preferís más volumen diario a costa de algo menos
-# de precisión, se puede cambiar a "gemini-2.5-flash-lite".
-MODEL = "gemini-2.5-flash"
+# Si Google vuelve a actualizar los modelos disponibles y este deja de
+# funcionar, el mensaje de error indica el nombre del modelo nuevo a usar.
+MODEL = "gemini-3.6-flash"
 
 SYSTEM_PROMPT = """Sos un asistente experto en pólizas de seguro argentinas.
 Vas a recibir el PDF de una póliza. Tu única tarea es extraer los datos
