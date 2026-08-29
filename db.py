@@ -337,6 +337,101 @@ def eliminar_poliza(poliza_id):
     conn.close()
 
 
+def obtener_poliza_por_id(poliza_id):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM polizas WHERE id = %s", (poliza_id,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return dict(row) if row else None
+
+
+def renovar_poliza(poliza_id, numero_poliza, vigencia_desde, vigencia_hasta,
+                    importe_total, cantidad_cuotas):
+    """
+    Marca la póliza actual como 'Renovada' (se conserva en el historial) y
+    crea una póliza nueva para el período siguiente, reutilizando los datos
+    del cliente, compañía, ramo y riesgo/patente.
+    """
+    vieja = obtener_poliza_por_id(poliza_id)
+    if not vieja:
+        raise ValueError("No se encontró la póliza a renovar.")
+
+    actualizar_estado_poliza(poliza_id, "Renovada")
+
+    nueva_id = insertar_poliza(
+        cliente_id=vieja["cliente_id"],
+        compania=vieja["compania_aseguradora"],
+        numero_poliza=numero_poliza,
+        ramo=vieja["ramo"],
+        riesgo_patente=vieja["riesgo_patente"],
+        vigencia_desde=vigencia_desde,
+        vigencia_hasta=vigencia_hasta,
+        importe_total=importe_total,
+        cantidad_cuotas=cantidad_cuotas,
+        pdf_path=vieja["pdf_path"],
+    )
+    return nueva_id
+
+
+# ---------------------------------------------------------------------------
+# MÉTRICAS DEL DASHBOARD
+# ---------------------------------------------------------------------------
+
+def metricas_generales():
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) AS total FROM clientes")
+    total_clientes = cur.fetchone()["total"]
+
+    cur.execute(
+        """SELECT COUNT(*) AS cantidad,
+                  COALESCE(SUM(importe_total), 0) AS suma,
+                  COALESCE(AVG(importe_total), 0) AS promedio
+           FROM polizas WHERE estado = 'Activa'"""
+    )
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+
+    return {
+        "total_clientes": total_clientes,
+        "polizas_vigentes": row["cantidad"],
+        "prima_total": float(row["suma"]),
+        "prima_promedio": float(row["promedio"]),
+    }
+
+
+def distribucion_por_ramo():
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """SELECT COALESCE(NULLIF(ramo, ''), 'Sin especificar') AS ramo, COUNT(*) AS cantidad
+           FROM polizas WHERE estado = 'Activa'
+           GROUP BY ramo ORDER BY cantidad DESC"""
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def distribucion_por_aseguradora():
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """SELECT COALESCE(NULLIF(compania_aseguradora, ''), 'Sin especificar') AS compania_aseguradora,
+                  COUNT(*) AS cantidad
+           FROM polizas WHERE estado = 'Activa'
+           GROUP BY compania_aseguradora ORDER BY cantidad DESC"""
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 # ---------------------------------------------------------------------------
 # BACKUP / EXPORTACIÓN
 # ---------------------------------------------------------------------------

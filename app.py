@@ -7,9 +7,10 @@ Ejecutar con: streamlit run app.py
 import os
 from pathlib import Path
 import io
-from datetime import date
+from datetime import date, datetime, timedelta
 
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 from dotenv import load_dotenv
 
@@ -90,6 +91,34 @@ else:
 # ---------------------------------------------------------------------------
 if pagina == "📊 Dashboard":
     st.title("📊 Tablero de Vencimientos")
+
+    metricas = db.metricas_generales()
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("👥 Total Clientes", metricas["total_clientes"])
+    m2.metric("📄 Pólizas Vigentes", metricas["polizas_vigentes"])
+    m3.metric("💵 Prima Total", f"${metricas['prima_total']:,.0f}")
+    m4.metric("📊 Prima Promedio", f"${metricas['prima_promedio']:,.0f}")
+
+    ramo_data = db.distribucion_por_ramo()
+    aseg_data = db.distribucion_por_aseguradora()
+    if ramo_data or aseg_data:
+        st.divider()
+        st.subheader("Distribución de cartera")
+        g1, g2 = st.columns(2)
+        if ramo_data:
+            fig_ramo = px.pie(
+                pd.DataFrame(ramo_data), names="ramo", values="cantidad",
+                title="Por Ramo", hole=0.4,
+            )
+            g1.plotly_chart(fig_ramo, use_container_width=True)
+        if aseg_data:
+            fig_aseg = px.pie(
+                pd.DataFrame(aseg_data), names="compania_aseguradora", values="cantidad",
+                title="Por Aseguradora", hole=0.4,
+            )
+            g2.plotly_chart(fig_aseg, use_container_width=True)
+
+    st.divider()
 
     polizas = db.listar_polizas_dashboard()
 
@@ -292,7 +321,7 @@ elif pagina == "👥 Clientes":
                 polizas = db.historial_polizas_cliente(cliente["id"])
                 if polizas:
                     for poliza in polizas:
-                        c1, c2, c3, c4, c5 = st.columns([2, 2, 1.5, 1.5, 1])
+                        c1, c2, c3, c4, c5, c6 = st.columns([2, 2, 1.3, 1.3, 1, 1])
                         c1.markdown(f"**{poliza['compania_aseguradora'] or '-'}**")
                         c1.caption(f"Póliza {poliza['numero_poliza'] or '-'} · {poliza['ramo'] or '-'}")
                         c2.caption(f"Desde: {poliza['vigencia_desde'] or '-'}")
@@ -315,6 +344,63 @@ elif pagina == "👥 Clientes":
                             if c5.button("🗑️ Eliminar", key=f"del_{poliza['id']}"):
                                 st.session_state[confirm_key] = True
                                 st.rerun()
+
+                        if poliza["estado"] == "Activa":
+                            renovar_key = f"mostrar_renovar_{poliza['id']}"
+                            if c6.button("🔄 Renovar", key=f"btn_renovar_{poliza['id']}"):
+                                st.session_state[renovar_key] = not st.session_state.get(renovar_key, False)
+                                st.rerun()
+
+                            if st.session_state.get(renovar_key):
+                                with st.form(f"form_renovar_{poliza['id']}"):
+                                    st.caption(
+                                        "Se crea una póliza nueva para el próximo período; "
+                                        "esta póliza actual queda marcada como 'Renovada' "
+                                        "y se conserva en el historial."
+                                    )
+                                    rc1, rc2 = st.columns(2)
+                                    nuevo_numero = rc1.text_input(
+                                        "N° de póliza (nuevo o el mismo)",
+                                        value=poliza["numero_poliza"] or "",
+                                    )
+                                    try:
+                                        desde_sugerido = poliza["vigencia_hasta"] or ""
+                                        hasta_sugerido = (
+                                            datetime.strptime(poliza["vigencia_hasta"], "%Y-%m-%d")
+                                            + timedelta(days=365)
+                                        ).strftime("%Y-%m-%d")
+                                    except (ValueError, TypeError):
+                                        desde_sugerido = ""
+                                        hasta_sugerido = ""
+                                    nueva_desde = rc1.text_input("Nueva vigencia desde", value=desde_sugerido)
+                                    nueva_hasta = rc2.text_input("Nueva vigencia hasta", value=hasta_sugerido)
+                                    nuevo_importe = rc1.number_input(
+                                        "Nuevo importe / premio",
+                                        min_value=0.0,
+                                        value=float(poliza["importe_total"] or 0),
+                                        step=100.0,
+                                    )
+                                    nueva_cant_cuotas = rc2.number_input(
+                                        "Nueva cantidad de cuotas",
+                                        min_value=1,
+                                        value=int(poliza["cantidad_cuotas"] or 1),
+                                        step=1,
+                                    )
+                                    confirmar_renovar = st.form_submit_button(
+                                        "✅ Confirmar renovación", type="primary"
+                                    )
+                                    if confirmar_renovar:
+                                        db.renovar_poliza(
+                                            poliza_id=poliza["id"],
+                                            numero_poliza=nuevo_numero,
+                                            vigencia_desde=nueva_desde,
+                                            vigencia_hasta=nueva_hasta,
+                                            importe_total=nuevo_importe,
+                                            cantidad_cuotas=int(nueva_cant_cuotas),
+                                        )
+                                        st.session_state.pop(renovar_key, None)
+                                        st.success("Póliza renovada correctamente.")
+                                        st.rerun()
                         st.divider()
                 else:
                     st.caption("Sin pólizas cargadas todavía.")
