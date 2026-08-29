@@ -6,6 +6,8 @@ Ejecutar con: streamlit run app.py
 
 import os
 from pathlib import Path
+import io
+from datetime import date
 
 import pandas as pd
 import streamlit as st
@@ -60,6 +62,28 @@ if not os.environ.get("GOOGLE_API_KEY"):
         "para poder usar la lectura automática de PDFs. "
         "Conseguí una clave gratis en https://aistudio.google.com/apikey"
     )
+
+st.sidebar.divider()
+st.sidebar.caption("💾 Copia de seguridad")
+_clientes_backup = db.obtener_todos_los_clientes()
+_polizas_backup = db.obtener_todas_las_polizas()
+_cuotas_backup = db.obtener_todas_las_cuotas()
+
+if _clientes_backup or _polizas_backup:
+    _buffer = io.BytesIO()
+    with pd.ExcelWriter(_buffer, engine="openpyxl") as writer:
+        pd.DataFrame(_clientes_backup).to_excel(writer, sheet_name="Clientes", index=False)
+        pd.DataFrame(_polizas_backup).to_excel(writer, sheet_name="Polizas", index=False)
+        pd.DataFrame(_cuotas_backup).to_excel(writer, sheet_name="Cuotas", index=False)
+    st.sidebar.download_button(
+        "⬇️ Descargar todo (Excel)",
+        data=_buffer.getvalue(),
+        file_name=f"backup_crm_seguros_{date.today().isoformat()}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        help="Guarda una copia de todos tus clientes, pólizas y cuotas en tu computadora.",
+    )
+else:
+    st.sidebar.caption("Todavía no hay datos para respaldar.")
 
 # ---------------------------------------------------------------------------
 # DASHBOARD
@@ -176,6 +200,24 @@ elif pagina == "📥 Cargar Póliza":
                 step=1,
             )
 
+            st.subheader("Medio de Pago")
+            st.caption(
+                "Por seguridad nunca se guarda el número completo de la tarjeta "
+                "ni el código de seguridad, solo los últimos 4 dígitos. "
+                "Completá solo los campos que correspondan según la forma de pago."
+            )
+            opciones_pago = ["", "Debito Automatico", "CBU", "Tarjeta de Credito", "Cuponera", "Mercado Pago"]
+            forma_pago_ia = datos.get("forma_pago") or ""
+            idx_pago = opciones_pago.index(forma_pago_ia) if forma_pago_ia in opciones_pago else 0
+            forma_pago = st.selectbox("Forma de pago", opciones_pago, index=idx_pago)
+
+            cp1, cp2, cp3, cp4 = st.columns(4)
+            banco_emisor = cp1.text_input("Banco", placeholder="Ej: BBVA")
+            marca_tarjeta = cp2.selectbox("Marca de tarjeta (si aplica)", ["", "Visa", "Mastercard", "Amex", "Otra"])
+            ultimos_4_digitos = cp3.text_input("Últimos 4 dígitos (si aplica)", max_chars=4)
+            vencimiento_tarjeta = cp4.text_input("Vto. tarjeta MM/AA (si aplica)", placeholder="12/28")
+            cbu_cvu = st.text_input("CBU / CVU (si aplica)")
+
             guardar = st.form_submit_button("💾 Guardar Póliza", type="primary")
 
             if guardar:
@@ -188,6 +230,12 @@ elif pagina == "📥 Cargar Póliza":
                     cliente_id = db.upsert_cliente(
                         nombre=nombre, cuit_dni=cuit_dni, telefono=telefono,
                         email=email, tipo_persona=tipo_persona,
+                        forma_pago=forma_pago or None,
+                        banco_emisor=banco_emisor or None,
+                        marca_tarjeta=marca_tarjeta or None,
+                        ultimos_4_digitos=ultimos_4_digitos or None,
+                        vencimiento_tarjeta=vencimiento_tarjeta or None,
+                        cbu_cvu=cbu_cvu or None,
                     )
                     db.insertar_poliza(
                         cliente_id=cliente_id,
@@ -220,13 +268,54 @@ elif pagina == "👥 Clientes":
         for cliente in clientes:
             with st.expander(f"{cliente['nombre_razon_social']} — {cliente['cuit_dni']}"):
                 st.caption(f"📞 {cliente['telefono'] or '-'} · ✉️ {cliente['email'] or '-'}")
+
+                forma_pago = cliente.get("forma_pago")
+                if forma_pago:
+                    if forma_pago == "Tarjeta de Credito":
+                        detalle_pago = (
+                            f"💳 {forma_pago} — {cliente.get('marca_tarjeta') or '-'} "
+                            f"terminada en {cliente.get('ultimos_4_digitos') or '----'} "
+                            f"({cliente.get('banco_emisor') or '-'}), "
+                            f"vence {cliente.get('vencimiento_tarjeta') or '-'}"
+                        )
+                    elif forma_pago in ("Debito Automatico", "CBU"):
+                        detalle_pago = (
+                            f"🏦 {forma_pago} — {cliente.get('banco_emisor') or '-'} "
+                            f"({cliente.get('cbu_cvu') or '-'})"
+                        )
+                    else:
+                        detalle_pago = f"💰 {forma_pago}"
+                    st.caption(detalle_pago)
+                else:
+                    st.caption("💰 Medio de pago: sin registrar")
+
                 polizas = db.historial_polizas_cliente(cliente["id"])
                 if polizas:
-                    df = pd.DataFrame(polizas)[
-                        ["compania_aseguradora", "numero_poliza", "ramo",
-                         "vigencia_desde", "vigencia_hasta", "estado", "importe_total"]
-                    ]
-                    st.dataframe(df, use_container_width=True, hide_index=True)
+                    for poliza in polizas:
+                        c1, c2, c3, c4, c5 = st.columns([2, 2, 1.5, 1.5, 1])
+                        c1.markdown(f"**{poliza['compania_aseguradora'] or '-'}**")
+                        c1.caption(f"Póliza {poliza['numero_poliza'] or '-'} · {poliza['ramo'] or '-'}")
+                        c2.caption(f"Desde: {poliza['vigencia_desde'] or '-'}")
+                        c2.caption(f"Hasta: {poliza['vigencia_hasta'] or '-'}")
+                        c3.caption(f"Estado: {poliza['estado']}")
+                        monto = f"${poliza['importe_total']:,.2f}" if poliza["importe_total"] else "-"
+                        c4.caption(monto)
+
+                        confirm_key = f"confirmar_borrar_{poliza['id']}"
+                        if st.session_state.get(confirm_key):
+                            c5.caption("¿Seguro?")
+                            if c5.button("✅ Sí, borrar", key=f"si_{poliza['id']}"):
+                                db.eliminar_poliza(poliza["id"])
+                                st.session_state.pop(confirm_key, None)
+                                st.rerun()
+                            if c5.button("Cancelar", key=f"no_{poliza['id']}"):
+                                st.session_state.pop(confirm_key, None)
+                                st.rerun()
+                        else:
+                            if c5.button("🗑️ Eliminar", key=f"del_{poliza['id']}"):
+                                st.session_state[confirm_key] = True
+                                st.rerun()
+                        st.divider()
                 else:
                     st.caption("Sin pólizas cargadas todavía.")
 

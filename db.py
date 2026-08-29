@@ -1,46 +1,56 @@
 """
 db.py
 Capa de acceso a datos para el CRM de seguros.
-Usa SQLite (archivo local) para el MVP. Migrar a Postgres/Supabase
-más adelante solo requiere cambiar la conexión (ver README).
+Usa PostgreSQL a través de Supabase: una base de datos permanente en
+la nube (a diferencia del SQLite local anterior, estos datos NO se
+borran cuando el servidor de Streamlit se reinicia).
 """
 
-import sqlite3
+import os
 from datetime import date, datetime, timedelta
-from pathlib import Path
 
-DB_PATH = Path(__file__).parent / "data" / "crm_seguros.db"
+import psycopg2
+import psycopg2.extras
 
 
 def get_connection():
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.row_factory = sqlite3.Row
+    database_url = os.environ.get("SUPABASE_DB_URL")
+    if not database_url:
+        raise RuntimeError(
+            "No se encontró SUPABASE_DB_URL en las variables de entorno. "
+            "Configurala en el archivo .env (o en 'Secrets' en Streamlit Cloud) "
+            "con la cadena de conexión de tu proyecto de Supabase."
+        )
+    conn = psycopg2.connect(database_url, cursor_factory=psycopg2.extras.RealDictCursor)
     return conn
 
 
 def init_db():
-    """Crea las tablas si no existen. Llamar una sola vez al arrancar la app."""
+    """Crea las tablas si no existen. Se llama una vez al arrancar la app."""
     conn = get_connection()
     cur = conn.cursor()
-
-    cur.executescript(
+    cur.execute(
         """
         CREATE TABLE IF NOT EXISTS clientes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             tipo_persona TEXT CHECK(tipo_persona IN ('Fisica','Juridica')) DEFAULT 'Fisica',
             nombre_razon_social TEXT NOT NULL,
             cuit_dni TEXT UNIQUE NOT NULL,
             telefono TEXT,
             email TEXT,
             direccion TEXT,
-            fecha_alta TEXT DEFAULT (datetime('now'))
+            forma_pago TEXT CHECK(forma_pago IN ('Debito Automatico','CBU','Tarjeta de Credito','Cuponera','Mercado Pago')),
+            banco_emisor TEXT,
+            marca_tarjeta TEXT,
+            ultimos_4_digitos TEXT,
+            vencimiento_tarjeta TEXT,
+            cbu_cvu TEXT,
+            fecha_alta TIMESTAMP DEFAULT NOW()
         );
 
         CREATE TABLE IF NOT EXISTS polizas (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            cliente_id INTEGER NOT NULL,
+            id SERIAL PRIMARY KEY,
+            cliente_id INTEGER NOT NULL REFERENCES clientes(id) ON DELETE CASCADE,
             compania_aseguradora TEXT,
             numero_poliza TEXT,
             ramo TEXT,
@@ -51,34 +61,32 @@ def init_db():
             cantidad_cuotas INTEGER DEFAULT 1,
             estado TEXT CHECK(estado IN ('Activa','Vencida','Anulada','Renovada')) DEFAULT 'Activa',
             pdf_path TEXT,
-            fecha_carga TEXT DEFAULT (datetime('now')),
-            FOREIGN KEY (cliente_id) REFERENCES clientes(id) ON DELETE CASCADE
+            fecha_carga TIMESTAMP DEFAULT NOW()
         );
 
         CREATE TABLE IF NOT EXISTS cuotas (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            poliza_id INTEGER NOT NULL,
+            id SERIAL PRIMARY KEY,
+            poliza_id INTEGER NOT NULL REFERENCES polizas(id) ON DELETE CASCADE,
             numero_cuota INTEGER,
             monto REAL,
             fecha_vencimiento TEXT,
             fecha_pago TEXT,
-            estado TEXT CHECK(estado IN ('Pendiente','Pagada','Vencida')) DEFAULT 'Pendiente',
-            FOREIGN KEY (poliza_id) REFERENCES polizas(id) ON DELETE CASCADE
+            estado TEXT CHECK(estado IN ('Pendiente','Pagada','Vencida')) DEFAULT 'Pendiente'
         );
 
         CREATE TABLE IF NOT EXISTS alertas (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            poliza_id INTEGER NOT NULL,
+            id SERIAL PRIMARY KEY,
+            poliza_id INTEGER NOT NULL REFERENCES polizas(id) ON DELETE CASCADE,
             tipo TEXT CHECK(tipo IN ('Vencimiento_Poliza','Vencimiento_Cuota')),
             dias_anticipacion INTEGER,
             fecha_alerta TEXT,
             enviada INTEGER DEFAULT 0,
-            fecha_envio TEXT,
-            FOREIGN KEY (poliza_id) REFERENCES polizas(id) ON DELETE CASCADE
+            fecha_envio TEXT
         );
         """
     )
     conn.commit()
+    cur.close()
     conn.close()
 
 
@@ -88,19 +96,25 @@ def init_db():
 
 def buscar_cliente_por_cuit(cuit_dni: str):
     conn = get_connection()
-    row = conn.execute(
-        "SELECT * FROM clientes WHERE cuit_dni = ?", (cuit_dni,)
-    ).fetchone()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM clientes WHERE cuit_dni = %s", (cuit_dni,))
+    row = cur.fetchone()
+    cur.close()
     conn.close()
     return dict(row) if row else None
 
 
 def upsert_cliente(nombre, cuit_dni, telefono=None, email=None,
-                    tipo_persona="Fisica", direccion=None):
+                    tipo_persona="Fisica", direccion=None,
+                    forma_pago=None, banco_emisor=None, marca_tarjeta=None,
+                    ultimos_4_digitos=None, vencimiento_tarjeta=None, cbu_cvu=None):
     """
     Vinculación automática por CUIT/DNI:
-    - Si el cliente existe -> actualiza datos de contacto y devuelve su id.
+    - Si el cliente existe -> actualiza datos de contacto y medio de pago, devuelve su id.
     - Si no existe -> lo crea.
+    Nota de seguridad: NUNCA se guarda el número completo de tarjeta ni el
+    código de seguridad (CVV). Solo los últimos 4 dígitos, suficientes para
+    identificarla en una gestión de cobranza.
     """
     existente = buscar_cliente_por_cuit(cuit_dni)
     conn = get_connection()
@@ -109,51 +123,68 @@ def upsert_cliente(nombre, cuit_dni, telefono=None, email=None,
     if existente:
         cur.execute(
             """UPDATE clientes
-               SET nombre_razon_social = COALESCE(?, nombre_razon_social),
-                   telefono = COALESCE(?, telefono),
-                   email = COALESCE(?, email),
-                   direccion = COALESCE(?, direccion)
-               WHERE cuit_dni = ?""",
-            (nombre, telefono, email, direccion, cuit_dni),
+               SET nombre_razon_social = COALESCE(%s, nombre_razon_social),
+                   telefono = COALESCE(%s, telefono),
+                   email = COALESCE(%s, email),
+                   direccion = COALESCE(%s, direccion),
+                   forma_pago = COALESCE(%s, forma_pago),
+                   banco_emisor = COALESCE(%s, banco_emisor),
+                   marca_tarjeta = COALESCE(%s, marca_tarjeta),
+                   ultimos_4_digitos = COALESCE(%s, ultimos_4_digitos),
+                   vencimiento_tarjeta = COALESCE(%s, vencimiento_tarjeta),
+                   cbu_cvu = COALESCE(%s, cbu_cvu)
+               WHERE cuit_dni = %s""",
+            (nombre, telefono, email, direccion, forma_pago, banco_emisor,
+             marca_tarjeta, ultimos_4_digitos, vencimiento_tarjeta, cbu_cvu, cuit_dni),
         )
         conn.commit()
         cliente_id = existente["id"]
     else:
         cur.execute(
-            """INSERT INTO clientes (tipo_persona, nombre_razon_social, cuit_dni, telefono, email, direccion)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (tipo_persona, nombre, cuit_dni, telefono, email, direccion),
+            """INSERT INTO clientes
+               (tipo_persona, nombre_razon_social, cuit_dni, telefono, email, direccion,
+                forma_pago, banco_emisor, marca_tarjeta, ultimos_4_digitos,
+                vencimiento_tarjeta, cbu_cvu)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+            (tipo_persona, nombre, cuit_dni, telefono, email, direccion,
+             forma_pago, banco_emisor, marca_tarjeta, ultimos_4_digitos,
+             vencimiento_tarjeta, cbu_cvu),
         )
+        cliente_id = cur.fetchone()["id"]
         conn.commit()
-        cliente_id = cur.lastrowid
 
+    cur.close()
     conn.close()
     return cliente_id
 
 
 def listar_clientes(filtro: str = ""):
     conn = get_connection()
+    cur = conn.cursor()
     if filtro:
-        rows = conn.execute(
+        cur.execute(
             """SELECT * FROM clientes
-               WHERE nombre_razon_social LIKE ? OR cuit_dni LIKE ?
+               WHERE nombre_razon_social ILIKE %s OR cuit_dni ILIKE %s
                ORDER BY nombre_razon_social""",
             (f"%{filtro}%", f"%{filtro}%"),
-        ).fetchall()
+        )
     else:
-        rows = conn.execute(
-            "SELECT * FROM clientes ORDER BY nombre_razon_social"
-        ).fetchall()
+        cur.execute("SELECT * FROM clientes ORDER BY nombre_razon_social")
+    rows = cur.fetchall()
+    cur.close()
     conn.close()
     return [dict(r) for r in rows]
 
 
 def historial_polizas_cliente(cliente_id: int):
     conn = get_connection()
-    rows = conn.execute(
-        "SELECT * FROM polizas WHERE cliente_id = ? ORDER BY vigencia_hasta DESC",
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT * FROM polizas WHERE cliente_id = %s ORDER BY vigencia_hasta DESC",
         (cliente_id,),
-    ).fetchall()
+    )
+    rows = cur.fetchall()
+    cur.close()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -171,12 +202,13 @@ def insertar_poliza(cliente_id, compania, numero_poliza, ramo, riesgo_patente,
         """INSERT INTO polizas
            (cliente_id, compania_aseguradora, numero_poliza, ramo, riesgo_patente,
             vigencia_desde, vigencia_hasta, importe_total, cantidad_cuotas, pdf_path)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
         (cliente_id, compania, numero_poliza, ramo, riesgo_patente,
          vigencia_desde, vigencia_hasta, importe_total, cantidad_cuotas, pdf_path),
     )
-    poliza_id = cur.lastrowid
+    poliza_id = cur.fetchone()["id"]
     conn.commit()
+    cur.close()
     conn.close()
 
     generar_cuotas(poliza_id, importe_total, cantidad_cuotas, vigencia_desde)
@@ -201,10 +233,11 @@ def generar_cuotas(poliza_id, importe_total, cantidad_cuotas, vigencia_desde):
         fecha_venc = fecha_inicio + timedelta(days=30 * (i + 1))
         cur.execute(
             """INSERT INTO cuotas (poliza_id, numero_cuota, monto, fecha_vencimiento, estado)
-               VALUES (?, ?, ?, ?, 'Pendiente')""",
+               VALUES (%s, %s, %s, %s, 'Pendiente')""",
             (poliza_id, i + 1, monto_cuota, fecha_venc.strftime("%Y-%m-%d")),
         )
     conn.commit()
+    cur.close()
     conn.close()
 
 
@@ -221,10 +254,11 @@ def generar_alertas_poliza(poliza_id, vigencia_hasta):
         fecha_alerta = fecha_venc - timedelta(days=dias)
         cur.execute(
             """INSERT INTO alertas (poliza_id, tipo, dias_anticipacion, fecha_alerta)
-               VALUES (?, 'Vencimiento_Poliza', ?, ?)""",
+               VALUES (%s, 'Vencimiento_Poliza', %s, %s)""",
             (poliza_id, dias, fecha_alerta.strftime("%Y-%m-%d")),
         )
     conn.commit()
+    cur.close()
     conn.close()
 
 
@@ -234,12 +268,15 @@ def listar_polizas_dashboard():
     para armar el tablero de colores (Verde / Amarillo / Rojo / Gris-vencida).
     """
     conn = get_connection()
-    rows = conn.execute(
+    cur = conn.cursor()
+    cur.execute(
         """SELECT p.*, c.nombre_razon_social, c.cuit_dni, c.telefono, c.email
            FROM polizas p
            JOIN clientes c ON c.id = p.cliente_id
            ORDER BY p.vigencia_hasta ASC"""
-    ).fetchall()
+    )
+    rows = cur.fetchall()
+    cur.close()
     conn.close()
 
     resultado = []
@@ -269,9 +306,66 @@ def listar_polizas_dashboard():
 
 def actualizar_estado_poliza(poliza_id, nuevo_estado):
     conn = get_connection()
-    conn.execute("UPDATE polizas SET estado = ? WHERE id = ?", (nuevo_estado, poliza_id))
+    cur = conn.cursor()
+    cur.execute("UPDATE polizas SET estado = %s WHERE id = %s", (nuevo_estado, poliza_id))
     conn.commit()
+    cur.close()
     conn.close()
+
+
+def eliminar_poliza(poliza_id):
+    """Elimina la póliza y, en cascada, sus cuotas y alertas asociadas."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM polizas WHERE id = %s", (poliza_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# BACKUP / EXPORTACIÓN
+# ---------------------------------------------------------------------------
+
+def obtener_todos_los_clientes():
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM clientes ORDER BY nombre_razon_social")
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def obtener_todas_las_polizas():
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """SELECT p.*, c.nombre_razon_social, c.cuit_dni
+           FROM polizas p
+           JOIN clientes c ON c.id = p.cliente_id
+           ORDER BY p.vigencia_hasta"""
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def obtener_todas_las_cuotas():
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """SELECT cu.*, p.numero_poliza, c.nombre_razon_social
+           FROM cuotas cu
+           JOIN polizas p ON p.id = cu.poliza_id
+           JOIN clientes c ON c.id = p.cliente_id
+           ORDER BY cu.fecha_vencimiento"""
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 # ---------------------------------------------------------------------------
@@ -280,14 +374,17 @@ def actualizar_estado_poliza(poliza_id, nuevo_estado):
 
 def listar_cuotas_pendientes():
     conn = get_connection()
-    rows = conn.execute(
+    cur = conn.cursor()
+    cur.execute(
         """SELECT cu.*, p.numero_poliza, p.compania_aseguradora, c.nombre_razon_social, c.telefono
            FROM cuotas cu
            JOIN polizas p ON p.id = cu.poliza_id
            JOIN clientes c ON c.id = p.cliente_id
            WHERE cu.estado != 'Pagada'
            ORDER BY cu.fecha_vencimiento ASC"""
-    ).fetchall()
+    )
+    rows = cur.fetchall()
+    cur.close()
     conn.close()
 
     hoy = date.today()
@@ -306,9 +403,11 @@ def listar_cuotas_pendientes():
 
 def marcar_cuota_pagada(cuota_id):
     conn = get_connection()
-    conn.execute(
-        "UPDATE cuotas SET estado = 'Pagada', fecha_pago = ? WHERE id = ?",
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE cuotas SET estado = 'Pagada', fecha_pago = %s WHERE id = %s",
         (date.today().strftime("%Y-%m-%d"), cuota_id),
     )
     conn.commit()
+    cur.close()
     conn.close()

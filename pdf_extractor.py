@@ -43,7 +43,8 @@ Estructura exacta a devolver:
   "vigencia_desde": string en formato YYYY-MM-DD o null,
   "vigencia_hasta": string en formato YYYY-MM-DD o null,
   "importe_total": number o null (premio total en pesos, sin símbolo de moneda),
-  "cantidad_cuotas": integer o null
+  "cantidad_cuotas": integer o null,
+  "forma_pago": string o null (una de: "Debito Automatico", "CBU", "Tarjeta de Credito", "Cuponera", "Mercado Pago" — solo si está explícito en el documento)
 }
 
 Si un dato no aparece en el documento o no estás seguro, devolvé null para ese campo.

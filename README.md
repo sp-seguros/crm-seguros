@@ -151,20 +151,34 @@ contenedor de tanto en tanto y el archivo SQLite puede perderse. Para uso
 personal esporádico puede alcanzar, pero para producción real te conviene
 migrar a Supabase (paso siguiente) para no perder datos.
 
-## 5. Migrar de SQLite a Supabase (cuando lo necesites)
+## 5. Base de datos: Supabase (PostgreSQL) — obligatorio
 
-Supabase te da Postgres gestionado gratis (hasta 500MB) más un panel visual.
-Los cambios quedan contenidos en `db.py`:
+El sistema usa **Supabase** como base de datos permanente. A diferencia del
+SQLite local de las primeras versiones, estos datos **no se pierden** cuando
+Streamlit Cloud reinicia el servidor.
 
-1. Creás un proyecto en https://supabase.com/ (gratis).
-2. Instalás el driver: `pip install psycopg2-binary`.
-3. Reemplazás `get_connection()` en `db.py` para que use
-   `psycopg2.connect(...)` con la connection string que te da Supabase,
-   en vez de `sqlite3.connect(DB_PATH)`.
-4. Las tablas del `CREATE TABLE` son casi idénticas en Postgres (cambian
-   detalles como `AUTOINCREMENT` → `SERIAL`). Te puedo generar ese script
-   `schema.sql` para Postgres cuando quieras dar este paso.
-5. El resto de la app (`app.py`, `pdf_extractor.py`) no cambia nada.
+### Crear tu proyecto de Supabase (gratis, sin tarjeta)
+
+1. Entrá a https://supabase.com/ y creá una cuenta (podés usar tu cuenta de GitHub).
+2. Hacé clic en "New Project". Elegí un nombre (ej: `crm-seguros`) y una
+   **contraseña de base de datos** — anotala, la vas a necesitar.
+3. Esperá 1-2 minutos mientras Supabase prepara tu base de datos.
+4. Una vez lista, andá a **Project Settings** (ícono de engranaje) → **Database**.
+5. Buscá la sección **"Connection string"** → pestaña **"URI"**. Copiá esa
+   cadena completa (empieza con `postgresql://postgres:...`).
+6. Reemplazá `[YOUR-PASSWORD]` dentro de esa cadena por la contraseña que
+   pusiste en el paso 2.
+
+### Configurar la conexión
+
+En tu archivo `.env` local (o en "Secrets" de Streamlit Cloud), agregá:
+
+```
+SUPABASE_DB_URL=postgresql://postgres:tu-password-real@db.xxxxxxxxxxxx.supabase.co:5432/postgres
+```
+
+No hace falta crear las tablas a mano: la app las crea solas la primera vez
+que arranca (`db.init_db()`).
 
 ## 6. Próximos pasos sugeridos (fuera del MVP)
 
