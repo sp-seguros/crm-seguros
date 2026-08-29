@@ -19,10 +19,12 @@ import os
 
 import google.generativeai as genai
 
-# Modelo gratuito recomendado (buena calidad + límite diario amplio).
-# Si Google vuelve a actualizar los modelos disponibles y este deja de
-# funcionar, el mensaje de error indica el nombre del modelo nuevo a usar.
-MODEL = "gemini-3.6-flash"
+# Modelo gratuito recomendado: Flash-Lite está pensado justo para tareas de
+# extracción de datos de documentos (más rápido y con más margen diario
+# gratuito que el modelo Flash completo). Si Google vuelve a actualizar los
+# modelos disponibles y este deja de funcionar, el mensaje de error indica
+# el nombre del modelo nuevo a usar.
+MODEL = "gemini-3.5-flash-lite"
 
 SYSTEM_PROMPT = """Sos un asistente experto en pólizas de seguro argentinas.
 Vas a recibir el PDF de una póliza. Tu única tarea es extraer los datos
@@ -82,7 +84,8 @@ def extract_policy_data(pdf_bytes: bytes) -> dict:
         [
             {"mime_type": "application/pdf", "data": pdf_bytes},
             "Extraé los datos de esta póliza y devolvé solo el JSON.",
-        ]
+        ],
+        request_options={"timeout": 45},
     )
 
     raw_text = (response.text or "").strip()
