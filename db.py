@@ -14,15 +14,25 @@ import psycopg2.extras
 
 
 def get_connection():
-    database_url = os.environ.get("SUPABASE_DB_URL")
-    if not database_url:
+    host = os.environ.get("SUPABASE_HOST")
+    port = os.environ.get("SUPABASE_PORT", "5432")
+    dbname = os.environ.get("SUPABASE_DB", "postgres")
+    user = os.environ.get("SUPABASE_USER")
+    password = os.environ.get("SUPABASE_PASSWORD")
+
+    if not all([host, user, password]):
         raise RuntimeError(
-            "No se encontró SUPABASE_DB_URL en las variables de entorno. "
-            "Configurala en el archivo .env (o en 'Secrets' en Streamlit Cloud) "
-            "con la cadena de conexión de tu proyecto de Supabase."
+            "Faltan datos de conexión a Supabase. Configurá en el archivo .env "
+            "(o en 'Secrets' en Streamlit Cloud): SUPABASE_HOST, SUPABASE_PORT, "
+            "SUPABASE_DB, SUPABASE_USER y SUPABASE_PASSWORD."
         )
+
     conn = psycopg2.connect(
-        database_url,
+        host=host,
+        port=port,
+        dbname=dbname,
+        user=user,
+        password=password,
         cursor_factory=psycopg2.extras.RealDictCursor,
         connect_timeout=10,
     )
