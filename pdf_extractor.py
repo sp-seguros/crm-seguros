@@ -85,7 +85,7 @@ def extract_policy_data(pdf_bytes: bytes) -> dict:
             {"mime_type": "application/pdf", "data": pdf_bytes},
             "Extraé los datos de esta póliza y devolvé solo el JSON.",
         ],
-        request_options={"timeout": 45},
+        request_options={"timeout": 90},
     )
 
     raw_text = (response.text or "").strip()
