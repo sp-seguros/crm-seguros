@@ -21,7 +21,11 @@ def get_connection():
             "Configurala en el archivo .env (o en 'Secrets' en Streamlit Cloud) "
             "con la cadena de conexión de tu proyecto de Supabase."
         )
-    conn = psycopg2.connect(database_url, cursor_factory=psycopg2.extras.RealDictCursor)
+    conn = psycopg2.connect(
+        database_url,
+        cursor_factory=psycopg2.extras.RealDictCursor,
+        connect_timeout=10,
+    )
     return conn
 
 
