@@ -7,6 +7,7 @@ borran cuando el servidor de Streamlit se reinicia).
 """
 
 import os
+import unicodedata
 from datetime import date, datetime, timedelta
 
 import psycopg2
@@ -462,21 +463,55 @@ def distribucion_por_ramo():
     return [dict(r) for r in rows]
 
 
+_MARCAS_ASEGURADORAS_CONOCIDAS = [
+    "ALLIANZ", "ZURICH", "FEDERACION PATRONAL", "SANCOR", "LA CAJA",
+    "RIVADAVIA", "SAN CRISTOBAL", "MERCANTIL ANDINA", "NACION SEGUROS",
+    "PROVINCIA SEGUROS", "HDI", "ORBIS", "RUS", "MAPFRE", "MERIDIONAL",
+    "BOSTON", "PRUDENCIA", "GALICIA SEGUROS", "SMG SEGUROS", "COOPERACION MUTUAL",
+    "SURA", "EXPERTA", "ASOCIART",
+]
+
+
+def _limpiar_nombre_aseguradora(nombre):
+    """
+    Normaliza el nombre de una aseguradora para agrupar variantes del mismo
+    nombre en los gráficos (mayúsculas, sin espacios extra, sin acentos, y
+    reducido a la marca conocida si corresponde, ej: "Allianz Argentina
+    Compañía de Seguros S.A." y "ALLIANZ ARGENTINA COMPANIA DE SEGUROS S.A."
+    quedan ambas como "ALLIANZ").
+    """
+    if not nombre or not nombre.strip():
+        return "Sin especificar"
+
+    texto = nombre.strip().upper()
+    texto = unicodedata.normalize("NFKD", texto)
+    texto = "".join(c for c in texto if not unicodedata.combining(c))
+
+    for marca in _MARCAS_ASEGURADORAS_CONOCIDAS:
+        if marca in texto:
+            return marca
+    return texto
+
+
 def distribucion_por_aseguradora():
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute(
-        """SELECT UPPER(TRIM(COALESCE(NULLIF(compania_aseguradora, ''), 'Sin especificar')))
-                  AS compania_aseguradora,
-                  COUNT(*) AS cantidad
-           FROM polizas WHERE estado = 'Activa'
-           GROUP BY UPPER(TRIM(COALESCE(NULLIF(compania_aseguradora, ''), 'Sin especificar')))
-           ORDER BY cantidad DESC"""
-    )
+    cur.execute("SELECT compania_aseguradora FROM polizas WHERE estado = 'Activa'")
     rows = cur.fetchall()
     cur.close()
     conn.close()
-    return [dict(r) for r in rows]
+
+    conteo = {}
+    for r in rows:
+        nombre_limpio = _limpiar_nombre_aseguradora(r["compania_aseguradora"])
+        conteo[nombre_limpio] = conteo.get(nombre_limpio, 0) + 1
+
+    resultado = [
+        {"compania_aseguradora": nombre, "cantidad": cantidad}
+        for nombre, cantidad in conteo.items()
+    ]
+    resultado.sort(key=lambda x: x["cantidad"], reverse=True)
+    return resultado
 
 
 # ---------------------------------------------------------------------------

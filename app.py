@@ -41,13 +41,27 @@ st.markdown(
         letter-spacing: -0.5px;
     }
 
-    /* Tarjetas de métricas (st.metric) con borde y sombra suave */
+    /* Tarjetas de métricas (st.metric) con borde, sombra suave y contenido centrado */
     div[data-testid="stMetric"] {
         background-color: #ffffff;
         border: 1px solid #e6e9ef;
         border-radius: 12px;
-        padding: 14px 12px 10px 12px;
-        box-shadow: 0 2px 8px rgba(15, 23, 42, 0.06);
+        padding: 16px 12px 12px 12px;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+        text-align: center;
+    }
+    div[data-testid="stMetric"] > div {
+        justify-content: center;
+    }
+    div[data-testid="stMetricLabel"] {
+        justify-content: center;
+    }
+
+    /* Pills de los filtros (multiselect) con look más suave */
+    span[data-baseweb="tag"] {
+        border-radius: 999px !important;
+        background-color: #EDE9FE !important;
+        color: #4C1D95 !important;
     }
 
     /* Contenedores con borde (st.container(border=True)) más redondeados */
@@ -78,11 +92,11 @@ st.markdown(
 UPLOADS_DIR = Path(__file__).parent / "uploads"
 UPLOADS_DIR.mkdir(exist_ok=True)
 
-COLOR_HEX = {
-    "verde": "#1e7e34",
-    "amarillo": "#b58900",
-    "rojo": "#c0392b",
-    "gris": "#6c757d",
+COLOR_PASTEL = {
+    "verde": ("#DCFCE7", "#15803D"),
+    "amarillo": ("#FEF3C7", "#B45309"),
+    "rojo": ("#FEE2E2", "#B91C1C"),
+    "gris": ("#F1F5F9", "#475569"),
 }
 COLOR_LABEL = {
     "verde": "🟢 Vigente (+30 días)",
@@ -91,13 +105,39 @@ COLOR_LABEL = {
     "gris": "⚪ Vencida / sin fecha",
 }
 
+ESTADO_POLIZA_TIPO = {
+    "Activa": "verde", "Vencida": "rojo", "Anulada": "gris", "Renovada": "gris",
+}
+ESTADO_SINIESTRO_TIPO = {
+    "Denunciado": "amarillo", "En revision": "amarillo", "Pendiente liquidacion": "amarillo",
+    "Cerrado": "verde", "Rechazado": "rojo",
+}
+
+
+def badge_pastel(texto: str, tipo: str) -> str:
+    """Etiqueta ('pill') con color pastel suave, para estados de pólizas y siniestros."""
+    bg, fg = COLOR_PASTEL.get(tipo, COLOR_PASTEL["gris"])
+    return (
+        f"<span style='background-color:{bg};color:{fg};"
+        f"padding:3px 12px;border-radius:999px;font-size:0.8em;font-weight:600;'>{texto}</span>"
+    )
+
 
 def badge(color: str) -> str:
-    hex_color = COLOR_HEX[color]
     label = COLOR_LABEL[color]
-    return (
-        f"<span style='background-color:{hex_color};color:white;"
-        f"padding:3px 8px;border-radius:6px;font-size:0.8em'>{label}</span>"
+    return badge_pastel(label, color)
+
+
+def estado_vacio(icono: str, mensaje: str):
+    st.markdown(
+        f"""
+        <div style='background-color:#F4F2FF;border:1px solid #E4DFFB;
+                    border-radius:12px;padding:28px 20px;text-align:center;'>
+            <div style='font-size:2em;'>{icono}</div>
+            <div style='color:#4C1D95;font-weight:600;margin-top:6px;'>{mensaje}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
 
@@ -444,7 +484,10 @@ elif pagina == "👥 Clientes":
                         c1.caption(f"Póliza {poliza['numero_poliza'] or '-'} · {poliza['ramo'] or '-'}")
                         c2.caption(f"Desde: {poliza['vigencia_desde'] or '-'}")
                         c2.caption(f"Hasta: {poliza['vigencia_hasta'] or '-'}")
-                        c3.caption(f"Estado: {poliza['estado']}")
+                        c3.markdown(
+                            badge_pastel(poliza["estado"], ESTADO_POLIZA_TIPO.get(poliza["estado"], "gris")),
+                            unsafe_allow_html=True,
+                        )
                         monto = f"${poliza['importe_total']:,.2f}" if poliza["importe_total"] else "-"
                         c4.caption(monto)
 
@@ -653,10 +696,11 @@ elif pagina == "🚨 Siniestros":
         if not clientes_todos:
             st.info("Primero tenés que cargar al menos un cliente (desde 'Cargar Póliza').")
         else:
+            sel1, sel2 = st.columns(2)
             opciones_cliente = {
                 f"{c['nombre_razon_social']} — {c['cuit_dni']}": c["id"] for c in clientes_todos
             }
-            nombre_cliente_sel = st.selectbox(
+            nombre_cliente_sel = sel1.selectbox(
                 "Cliente", options=list(opciones_cliente.keys()), key="siniestro_cliente_sel"
             )
             cliente_id_sel = opciones_cliente[nombre_cliente_sel]
@@ -666,7 +710,7 @@ elif pagina == "🚨 Siniestros":
             for p in polizas_cliente_sel:
                 etiqueta = f"{p['compania_aseguradora'] or '-'} — Póliza {p['numero_poliza'] or '-'} ({p['estado']})"
                 opciones_poliza[etiqueta] = p["id"]
-            nombre_poliza_sel = st.selectbox("Póliza vinculada", options=list(opciones_poliza.keys()))
+            nombre_poliza_sel = sel2.selectbox("Póliza vinculada", options=list(opciones_poliza.keys()))
             poliza_id_sel = opciones_poliza[nombre_poliza_sel]
 
             with st.form("form_nuevo_siniestro"):
@@ -701,7 +745,7 @@ elif pagina == "🚨 Siniestros":
 
     siniestros = db.listar_siniestros()
     if not siniestros:
-        st.info("Todavía no hay siniestros cargados.")
+        estado_vacio("🚨", "Todavía no hay siniestros cargados.")
     else:
         ESTADOS_SINIESTRO = ["Denunciado", "En revision", "Pendiente liquidacion", "Cerrado", "Rechazado"]
         ESTADO_ICONO = {
@@ -740,7 +784,13 @@ elif pagina == "🚨 Siniestros":
                 if nuevo_estado != s["estado"]:
                     db.actualizar_estado_siniestro(s["id"], nuevo_estado)
                     st.rerun()
-                sc3.caption(f"{ESTADO_ICONO.get(s['estado'], '')} {s['estado']}")
+                sc3.markdown(
+                    badge_pastel(
+                        f"{ESTADO_ICONO.get(s['estado'], '')} {s['estado']}",
+                        ESTADO_SINIESTRO_TIPO.get(s["estado"], "gris"),
+                    ),
+                    unsafe_allow_html=True,
+                )
 
                 confirm_key_sin = f"confirmar_borrar_siniestro_{s['id']}"
                 if st.session_state.get(confirm_key_sin):
