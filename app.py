@@ -7,6 +7,7 @@ Ejecutar con: streamlit run app.py
 import os
 from pathlib import Path
 import io
+import urllib.parse
 from datetime import date, datetime, timedelta
 
 import pandas as pd
@@ -54,7 +55,7 @@ def badge(color: str) -> str:
 st.sidebar.title("📋 CRM Seguros")
 pagina = st.sidebar.radio(
     "Navegación",
-    ["📊 Dashboard", "📥 Cargar Póliza", "👥 Clientes", "💰 Cobranzas"],
+    ["📊 Dashboard", "📥 Cargar Póliza", "👥 Clientes", "💰 Cobranzas", "🚨 Siniestros"],
 )
 
 if not os.environ.get("GOOGLE_API_KEY"):
@@ -141,7 +142,29 @@ if pagina == "📊 Dashboard":
             default=["rojo", "amarillo", "verde", "gris"],
             format_func=lambda c: COLOR_LABEL[c],
         )
+
+        fc1, fc2 = st.columns([2, 1])
+        busqueda_dash = fc1.text_input(
+            "🔎 Buscar por cliente o CUIT/DNI", placeholder="Escribí un nombre o número..."
+        )
+        aseguradoras_disponibles = sorted(
+            df["compania_aseguradora"].dropna().unique().tolist()
+        )
+        aseguradora_sel = fc2.selectbox(
+            "Aseguradora", ["Todas"] + aseguradoras_disponibles
+        )
+
         df_filtrado = df[df["color"].isin(filtro_color)]
+
+        if busqueda_dash:
+            mask = (
+                df_filtrado["nombre_razon_social"].str.contains(busqueda_dash, case=False, na=False)
+                | df_filtrado["cuit_dni"].str.contains(busqueda_dash, case=False, na=False)
+            )
+            df_filtrado = df_filtrado[mask]
+
+        if aseguradora_sel != "Todas":
+            df_filtrado = df_filtrado[df_filtrado["compania_aseguradora"] == aseguradora_sel]
 
         for _, row in df_filtrado.iterrows():
             with st.container(border=True):
@@ -318,10 +341,15 @@ elif pagina == "👥 Clientes":
                 else:
                     st.caption("💰 Medio de pago: sin registrar")
 
+                siniestros_cliente = db.listar_siniestros_cliente(cliente["id"])
+                if siniestros_cliente:
+                    abiertos = sum(1 for s in siniestros_cliente if s["estado"] not in ("Cerrado", "Rechazado"))
+                    st.caption(f"🚨 {len(siniestros_cliente)} siniestro(s) — {abiertos} abierto(s)")
+
                 polizas = db.historial_polizas_cliente(cliente["id"])
                 if polizas:
                     for poliza in polizas:
-                        c1, c2, c3, c4, c5, c6 = st.columns([2, 2, 1.3, 1.3, 1, 1])
+                        c1, c2, c3, c4, c5, c6, c7 = st.columns([2, 2, 1.2, 1.2, 1, 1, 1])
                         c1.markdown(f"**{poliza['compania_aseguradora'] or '-'}**")
                         c1.caption(f"Póliza {poliza['numero_poliza'] or '-'} · {poliza['ramo'] or '-'}")
                         c2.caption(f"Desde: {poliza['vigencia_desde'] or '-'}")
@@ -345,9 +373,80 @@ elif pagina == "👥 Clientes":
                                 st.session_state[confirm_key] = True
                                 st.rerun()
 
+                        editar_key = f"mostrar_editar_{poliza['id']}"
+                        if c6.button("✏️ Editar", key=f"btn_editar_{poliza['id']}"):
+                            st.session_state[editar_key] = not st.session_state.get(editar_key, False)
+                            st.rerun()
+
+                        if st.session_state.get(editar_key):
+                            with st.form(f"form_editar_{poliza['id']}"):
+                                st.caption("Corregí los datos de esta póliza y guardá los cambios.")
+                                ec1, ec2 = st.columns(2)
+                                ed_compania = ec1.text_input(
+                                    "Compañía Aseguradora", value=poliza["compania_aseguradora"] or "",
+                                    key=f"ed_compania_{poliza['id']}",
+                                )
+                                ed_numero = ec2.text_input(
+                                    "N° de Póliza", value=poliza["numero_poliza"] or "",
+                                    key=f"ed_numero_{poliza['id']}",
+                                )
+                                ed_ramo = ec1.text_input(
+                                    "Ramo", value=poliza["ramo"] or "", key=f"ed_ramo_{poliza['id']}",
+                                )
+                                ed_riesgo = ec2.text_input(
+                                    "Riesgo / Patente", value=poliza["riesgo_patente"] or "",
+                                    key=f"ed_riesgo_{poliza['id']}",
+                                )
+                                ed_desde = ec1.text_input(
+                                    "Vigencia Desde (YYYY-MM-DD)", value=poliza["vigencia_desde"] or "",
+                                    key=f"ed_desde_{poliza['id']}",
+                                )
+                                ed_hasta = ec2.text_input(
+                                    "Vigencia Hasta (YYYY-MM-DD)", value=poliza["vigencia_hasta"] or "",
+                                    key=f"ed_hasta_{poliza['id']}",
+                                )
+                                ed_importe = ec1.number_input(
+                                    "Importe / Premio total", min_value=0.0,
+                                    value=float(poliza["importe_total"] or 0), step=100.0,
+                                    key=f"ed_importe_{poliza['id']}",
+                                )
+                                ed_cuotas = ec2.number_input(
+                                    "Cantidad de cuotas", min_value=1,
+                                    value=int(poliza["cantidad_cuotas"] or 1), step=1,
+                                    key=f"ed_cuotas_{poliza['id']}",
+                                )
+                                estados_poliza = ["Activa", "Vencida", "Anulada", "Renovada"]
+                                ed_estado = st.selectbox(
+                                    "Estado", estados_poliza,
+                                    index=estados_poliza.index(poliza["estado"])
+                                    if poliza["estado"] in estados_poliza else 0,
+                                    key=f"ed_estado_{poliza['id']}",
+                                )
+                                st.caption(
+                                    "Nota: si cambiás el importe o la cantidad de cuotas, las cuotas ya "
+                                    "generadas no se recalculan automáticamente."
+                                )
+                                confirmar_editar = st.form_submit_button("💾 Guardar cambios", type="primary")
+                                if confirmar_editar:
+                                    db.actualizar_poliza(
+                                        poliza_id=poliza["id"],
+                                        compania=ed_compania,
+                                        numero_poliza=ed_numero,
+                                        ramo=ed_ramo,
+                                        riesgo_patente=ed_riesgo,
+                                        vigencia_desde=ed_desde,
+                                        vigencia_hasta=ed_hasta,
+                                        importe_total=ed_importe,
+                                        cantidad_cuotas=int(ed_cuotas),
+                                        estado=ed_estado,
+                                    )
+                                    st.session_state.pop(editar_key, None)
+                                    st.success("Póliza actualizada correctamente.")
+                                    st.rerun()
+
                         if poliza["estado"] == "Activa":
                             renovar_key = f"mostrar_renovar_{poliza['id']}"
-                            if c6.button("🔄 Renovar", key=f"btn_renovar_{poliza['id']}"):
+                            if c7.button("🔄 Renovar", key=f"btn_renovar_{poliza['id']}"):
                                 st.session_state[renovar_key] = not st.session_state.get(renovar_key, False)
                                 st.rerun()
 
@@ -424,7 +523,7 @@ elif pagina == "💰 Cobranzas":
 
         for _, row in df.iterrows():
             with st.container(border=True):
-                c1, c2, c3, c4 = st.columns([3, 2, 2, 1])
+                c1, c2, c3, c4, c5 = st.columns([3, 2, 2, 1.3, 1])
                 c1.markdown(f"**{row['nombre_razon_social']}**")
                 c1.caption(f"Póliza {row['numero_poliza']} · {row['compania_aseguradora']}")
                 c2.markdown(f"Cuota N° {row['numero_cuota']}")
@@ -432,6 +531,116 @@ elif pagina == "💰 Cobranzas":
                 c3.markdown(f"${row['monto']:,.2f}")
                 estado_color = "🔴" if row["estado"] == "Vencida" else "🟡"
                 c3.caption(f"{estado_color} {row['estado']}")
-                if c4.button("Pagada", key=f"pagar_{row['id']}"):
+
+                telefono_digits = "".join(ch for ch in str(row.get("telefono") or "") if ch.isdigit())
+                if telefono_digits:
+                    if not telefono_digits.startswith("54"):
+                        telefono_digits = "54" + telefono_digits
+                    primer_nombre = (row["nombre_razon_social"] or "").split()[0]
+                    mensaje = (
+                        f"Hola {primer_nombre}, te escribo para recordarte que la cuota N° "
+                        f"{row['numero_cuota']} de tu póliza {row['numero_poliza']} "
+                        f"({row['compania_aseguradora']}) por ${row['monto']:,.2f} vence el "
+                        f"{row['fecha_vencimiento']}. ¡Cualquier consulta, avisame!"
+                    )
+                    wa_link = f"https://wa.me/{telefono_digits}?text={urllib.parse.quote(mensaje)}"
+                    c4.link_button("💬 WhatsApp", wa_link)
+                else:
+                    c4.caption("Sin teléfono")
+
+                if c5.button("Pagada", key=f"pagar_{row['id']}"):
                     db.marcar_cuota_pagada(row["id"])
                     st.rerun()
+
+# ---------------------------------------------------------------------------
+# SINIESTROS
+# ---------------------------------------------------------------------------
+elif pagina == "🚨 Siniestros":
+    st.title("🚨 Gestión de Siniestros")
+
+    with st.expander("➕ Cargar nuevo siniestro"):
+        clientes_todos = db.listar_clientes()
+        if not clientes_todos:
+            st.info("Primero tenés que cargar al menos un cliente (desde 'Cargar Póliza').")
+        else:
+            opciones_cliente = {
+                f"{c['nombre_razon_social']} — {c['cuit_dni']}": c["id"] for c in clientes_todos
+            }
+            nombre_cliente_sel = st.selectbox(
+                "Cliente", options=list(opciones_cliente.keys()), key="siniestro_cliente_sel"
+            )
+            cliente_id_sel = opciones_cliente[nombre_cliente_sel]
+
+            polizas_cliente_sel = db.historial_polizas_cliente(cliente_id_sel)
+            opciones_poliza = {"Sin vincular a una póliza específica": None}
+            for p in polizas_cliente_sel:
+                etiqueta = f"{p['compania_aseguradora'] or '-'} — Póliza {p['numero_poliza'] or '-'} ({p['estado']})"
+                opciones_poliza[etiqueta] = p["id"]
+            nombre_poliza_sel = st.selectbox("Póliza vinculada", options=list(opciones_poliza.keys()))
+            poliza_id_sel = opciones_poliza[nombre_poliza_sel]
+
+            with st.form("form_nuevo_siniestro"):
+                tipo_siniestro = st.selectbox(
+                    "Tipo de siniestro",
+                    ["Choque", "Robo/Hurto", "Incendio", "Granizo", "Rotura de cristales",
+                     "Responsabilidad Civil", "Daños por agua", "Otro"],
+                )
+                fecha_siniestro = st.text_input(
+                    "Fecha del siniestro (YYYY-MM-DD)", value=date.today().strftime("%Y-%m-%d")
+                )
+                descripcion = st.text_area("Descripción / detalle")
+                guardar_siniestro = st.form_submit_button("💾 Registrar siniestro", type="primary")
+
+                if guardar_siniestro:
+                    db.insertar_siniestro(
+                        cliente_id=cliente_id_sel,
+                        poliza_id=poliza_id_sel,
+                        tipo_siniestro=tipo_siniestro,
+                        fecha_siniestro=fecha_siniestro,
+                        descripcion=descripcion,
+                    )
+                    st.success("Siniestro registrado correctamente.")
+                    st.rerun()
+
+    st.divider()
+
+    siniestros = db.listar_siniestros()
+    if not siniestros:
+        st.info("Todavía no hay siniestros cargados.")
+    else:
+        ESTADOS_SINIESTRO = ["Denunciado", "En revision", "Pendiente liquidacion", "Cerrado", "Rechazado"]
+        ESTADO_ICONO = {
+            "Denunciado": "🆕", "En revision": "🔎", "Pendiente liquidacion": "⏳",
+            "Cerrado": "✅", "Rechazado": "❌",
+        }
+
+        filtro_estado = st.multiselect(
+            "Filtrar por estado", options=ESTADOS_SINIESTRO, default=ESTADOS_SINIESTRO
+        )
+
+        for s in siniestros:
+            if s["estado"] not in filtro_estado:
+                continue
+            with st.container(border=True):
+                sc1, sc2, sc3 = st.columns([3, 2, 2])
+                sc1.markdown(f"**{s['nombre_razon_social']}** — {s['cuit_dni']}")
+                sc1.caption(
+                    f"{s['tipo_siniestro'] or '-'} · "
+                    f"{s['compania_aseguradora'] or 'sin póliza vinculada'} "
+                    f"{('N° ' + s['numero_poliza']) if s['numero_poliza'] else ''}"
+                )
+                if s["descripcion"]:
+                    sc1.caption(f"📝 {s['descripcion']}")
+                sc2.caption(f"📅 Fecha: {s['fecha_siniestro'] or '-'}")
+
+                nuevo_estado = sc3.selectbox(
+                    "Estado",
+                    ESTADOS_SINIESTRO,
+                    index=ESTADOS_SINIESTRO.index(s["estado"]),
+                    key=f"estado_siniestro_{s['id']}",
+                    label_visibility="collapsed",
+                )
+                if nuevo_estado != s["estado"]:
+                    db.actualizar_estado_siniestro(s["id"], nuevo_estado)
+                    st.rerun()
+                sc3.caption(f"{ESTADO_ICONO.get(s['estado'], '')} {s['estado']}")

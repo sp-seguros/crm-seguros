@@ -97,6 +97,17 @@ def init_db():
             enviada INTEGER DEFAULT 0,
             fecha_envio TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS siniestros (
+            id SERIAL PRIMARY KEY,
+            cliente_id INTEGER NOT NULL REFERENCES clientes(id) ON DELETE CASCADE,
+            poliza_id INTEGER REFERENCES polizas(id) ON DELETE SET NULL,
+            tipo_siniestro TEXT,
+            fecha_siniestro TEXT,
+            descripcion TEXT,
+            estado TEXT CHECK(estado IN ('Denunciado','En revision','Pendiente liquidacion','Cerrado','Rechazado')) DEFAULT 'Denunciado',
+            fecha_carga TIMESTAMP DEFAULT NOW()
+        );
         """
     )
     conn.commit()
@@ -375,6 +386,37 @@ def renovar_poliza(poliza_id, numero_poliza, vigencia_desde, vigencia_hasta,
     return nueva_id
 
 
+def actualizar_poliza(poliza_id, compania, numero_poliza, ramo, riesgo_patente,
+                       vigencia_desde, vigencia_hasta, importe_total,
+                       cantidad_cuotas, estado):
+    """
+    Edita los datos de una póliza ya cargada. No recalcula las cuotas
+    automáticamente (para no alterar cuotas que ya puedan estar pagadas);
+    si cambia el importe o la cantidad de cuotas de forma sustancial,
+    conviene revisar el detalle de cuotas por separado.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """UPDATE polizas
+           SET compania_aseguradora = %s,
+               numero_poliza = %s,
+               ramo = %s,
+               riesgo_patente = %s,
+               vigencia_desde = %s,
+               vigencia_hasta = %s,
+               importe_total = %s,
+               cantidad_cuotas = %s,
+               estado = %s
+           WHERE id = %s""",
+        (compania, numero_poliza, ramo, riesgo_patente, vigencia_desde,
+         vigencia_hasta, importe_total, cantidad_cuotas, estado, poliza_id),
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
 # ---------------------------------------------------------------------------
 # MÉTRICAS DEL DASHBOARD
 # ---------------------------------------------------------------------------
@@ -517,6 +559,77 @@ def marcar_cuota_pagada(cuota_id):
         "UPDATE cuotas SET estado = 'Pagada', fecha_pago = %s WHERE id = %s",
         (date.today().strftime("%Y-%m-%d"), cuota_id),
     )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# SINIESTROS
+# ---------------------------------------------------------------------------
+
+def insertar_siniestro(cliente_id, poliza_id, tipo_siniestro, fecha_siniestro, descripcion):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """INSERT INTO siniestros (cliente_id, poliza_id, tipo_siniestro, fecha_siniestro, descripcion)
+           VALUES (%s, %s, %s, %s, %s) RETURNING id""",
+        (cliente_id, poliza_id, tipo_siniestro, fecha_siniestro, descripcion),
+    )
+    siniestro_id = cur.fetchone()["id"]
+    conn.commit()
+    cur.close()
+    conn.close()
+    return siniestro_id
+
+
+def listar_siniestros():
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """SELECT s.*, c.nombre_razon_social, c.cuit_dni, c.telefono,
+                  p.numero_poliza, p.compania_aseguradora
+           FROM siniestros s
+           JOIN clientes c ON c.id = s.cliente_id
+           LEFT JOIN polizas p ON p.id = s.poliza_id
+           ORDER BY s.fecha_siniestro DESC"""
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def listar_siniestros_cliente(cliente_id):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """SELECT s.*, p.numero_poliza, p.compania_aseguradora
+           FROM siniestros s
+           LEFT JOIN polizas p ON p.id = s.poliza_id
+           WHERE s.cliente_id = %s
+           ORDER BY s.fecha_siniestro DESC""",
+        (cliente_id,),
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def actualizar_estado_siniestro(siniestro_id, nuevo_estado):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("UPDATE siniestros SET estado = %s WHERE id = %s", (nuevo_estado, siniestro_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def eliminar_siniestro(siniestro_id):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM siniestros WHERE id = %s", (siniestro_id,))
     conn.commit()
     cur.close()
     conn.close()
