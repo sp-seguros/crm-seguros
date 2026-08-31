@@ -23,6 +23,50 @@ load_dotenv()
 st.set_page_config(page_title="CRM Seguros", page_icon="📋", layout="wide")
 db.init_db()
 
+st.markdown(
+    """
+    <style>
+    /* Barra lateral con fondo suave */
+    section[data-testid="stSidebar"] {
+        background-color: #f5f7fa;
+        border-right: 1px solid #e3e7ee;
+    }
+
+    /* Tarjetas de métricas (st.metric) con borde y sombra suave */
+    div[data-testid="stMetric"] {
+        background-color: #ffffff;
+        border: 1px solid #e6e9ef;
+        border-radius: 12px;
+        padding: 14px 12px 10px 12px;
+        box-shadow: 0 2px 8px rgba(15, 23, 42, 0.06);
+    }
+
+    /* Contenedores con borde (st.container(border=True)) más redondeados */
+    div[data-testid="stVerticalBlockBorderWrapper"] {
+        border-radius: 12px !important;
+        box-shadow: 0 1px 4px rgba(15, 23, 42, 0.05);
+    }
+
+    /* Fichas de clientes / grupos desplegables */
+    div[data-testid="stExpander"] {
+        border-radius: 10px;
+        border: 1px solid #e6e9ef;
+        overflow: hidden;
+    }
+
+    /* Jerarquía tipográfica de títulos */
+    h1 { font-weight: 800 !important; letter-spacing: -0.5px; }
+    h2, h3 { font-weight: 700 !important; }
+
+    /* Botones con esquinas más redondeadas */
+    button[kind="primary"], button[kind="secondary"] {
+        border-radius: 8px !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 UPLOADS_DIR = Path(__file__).parent / "uploads"
 UPLOADS_DIR.mkdir(exist_ok=True)
 
@@ -318,7 +362,27 @@ elif pagina == "👥 Clientes":
         st.info("No se encontraron clientes.")
     else:
         for cliente in clientes:
-            with st.expander(f"{cliente['nombre_razon_social']} — {cliente['cuit_dni']}"):
+            polizas_cliente = db.historial_polizas_cliente(cliente["id"])
+            siniestros_cliente = db.listar_siniestros_cliente(cliente["id"])
+            poliza_activa = next((p for p in polizas_cliente if p["estado"] == "Activa"), None)
+            siniestros_abiertos = sum(
+                1 for s in siniestros_cliente if s["estado"] not in ("Cerrado", "Rechazado")
+            )
+
+            resumen_poliza = (
+                f"📄 {poliza_activa['compania_aseguradora'] or '-'} N°{poliza_activa['numero_poliza'] or '-'}"
+                if poliza_activa else "📄 sin póliza activa"
+            )
+            resumen_pago = f"💳 {cliente.get('forma_pago') or 'sin medio de pago'}"
+            resumen_siniestros = f"🚨 {siniestros_abiertos} abierto(s)" if siniestros_cliente else ""
+
+            titulo_ficha = (
+                f"{cliente['nombre_razon_social']} — {cliente['cuit_dni']}  ·  "
+                f"{resumen_poliza}  ·  {resumen_pago}"
+                + (f"  ·  {resumen_siniestros}" if resumen_siniestros else "")
+            )
+
+            with st.expander(titulo_ficha):
                 st.caption(f"📞 {cliente['telefono'] or '-'} · ✉️ {cliente['email'] or '-'}")
 
                 forma_pago = cliente.get("forma_pago")
@@ -341,12 +405,10 @@ elif pagina == "👥 Clientes":
                 else:
                     st.caption("💰 Medio de pago: sin registrar")
 
-                siniestros_cliente = db.listar_siniestros_cliente(cliente["id"])
                 if siniestros_cliente:
-                    abiertos = sum(1 for s in siniestros_cliente if s["estado"] not in ("Cerrado", "Rechazado"))
-                    st.caption(f"🚨 {len(siniestros_cliente)} siniestro(s) — {abiertos} abierto(s)")
+                    st.caption(f"🚨 {len(siniestros_cliente)} siniestro(s) — {siniestros_abiertos} abierto(s)")
 
-                polizas = db.historial_polizas_cliente(cliente["id"])
+                polizas = polizas_cliente
                 if polizas:
                     for poliza in polizas:
                         c1, c2, c3, c4, c5, c6, c7 = st.columns([2, 2, 1.2, 1.2, 1, 1, 1])
@@ -580,13 +642,17 @@ elif pagina == "🚨 Siniestros":
             poliza_id_sel = opciones_poliza[nombre_poliza_sel]
 
             with st.form("form_nuevo_siniestro"):
-                tipo_siniestro = st.selectbox(
+                sf1, sf2 = st.columns(2)
+                tipo_siniestro = sf1.selectbox(
                     "Tipo de siniestro",
                     ["Choque", "Robo/Hurto", "Incendio", "Granizo", "Rotura de cristales",
                      "Responsabilidad Civil", "Daños por agua", "Otro"],
                 )
-                fecha_siniestro = st.text_input(
+                fecha_siniestro = sf2.text_input(
                     "Fecha del siniestro (YYYY-MM-DD)", value=date.today().strftime("%Y-%m-%d")
+                )
+                numero_denuncia = st.text_input(
+                    "N° de denuncia en la aseguradora (si ya lo tenés)"
                 )
                 descripcion = st.text_area("Descripción / detalle")
                 guardar_siniestro = st.form_submit_button("💾 Registrar siniestro", type="primary")
@@ -598,6 +664,7 @@ elif pagina == "🚨 Siniestros":
                         tipo_siniestro=tipo_siniestro,
                         fecha_siniestro=fecha_siniestro,
                         descripcion=descripcion,
+                        numero_denuncia=numero_denuncia or None,
                     )
                     st.success("Siniestro registrado correctamente.")
                     st.rerun()
@@ -631,6 +698,8 @@ elif pagina == "🚨 Siniestros":
                 )
                 if s["descripcion"]:
                     sc1.caption(f"📝 {s['descripcion']}")
+                if s.get("numero_denuncia"):
+                    sc1.caption(f"🔖 Denuncia N° {s['numero_denuncia']}")
                 sc2.caption(f"📅 Fecha: {s['fecha_siniestro'] or '-'}")
 
                 nuevo_estado = sc3.selectbox(

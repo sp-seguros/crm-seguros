@@ -105,11 +105,14 @@ def init_db():
             tipo_siniestro TEXT,
             fecha_siniestro TEXT,
             descripcion TEXT,
+            numero_denuncia TEXT,
             estado TEXT CHECK(estado IN ('Denunciado','En revision','Pendiente liquidacion','Cerrado','Rechazado')) DEFAULT 'Denunciado',
             fecha_carga TIMESTAMP DEFAULT NOW()
         );
         """
     )
+    # Migración: agrega columnas nuevas a tablas que ya existían de versiones anteriores
+    cur.execute("ALTER TABLE siniestros ADD COLUMN IF NOT EXISTS numero_denuncia TEXT;")
     conn.commit()
     cur.close()
     conn.close()
@@ -463,10 +466,12 @@ def distribucion_por_aseguradora():
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
-        """SELECT COALESCE(NULLIF(compania_aseguradora, ''), 'Sin especificar') AS compania_aseguradora,
+        """SELECT UPPER(TRIM(COALESCE(NULLIF(compania_aseguradora, ''), 'Sin especificar')))
+                  AS compania_aseguradora,
                   COUNT(*) AS cantidad
            FROM polizas WHERE estado = 'Activa'
-           GROUP BY compania_aseguradora ORDER BY cantidad DESC"""
+           GROUP BY UPPER(TRIM(COALESCE(NULLIF(compania_aseguradora, ''), 'Sin especificar')))
+           ORDER BY cantidad DESC"""
     )
     rows = cur.fetchall()
     cur.close()
@@ -568,13 +573,15 @@ def marcar_cuota_pagada(cuota_id):
 # SINIESTROS
 # ---------------------------------------------------------------------------
 
-def insertar_siniestro(cliente_id, poliza_id, tipo_siniestro, fecha_siniestro, descripcion):
+def insertar_siniestro(cliente_id, poliza_id, tipo_siniestro, fecha_siniestro,
+                        descripcion, numero_denuncia=None):
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
-        """INSERT INTO siniestros (cliente_id, poliza_id, tipo_siniestro, fecha_siniestro, descripcion)
-           VALUES (%s, %s, %s, %s, %s) RETURNING id""",
-        (cliente_id, poliza_id, tipo_siniestro, fecha_siniestro, descripcion),
+        """INSERT INTO siniestros (cliente_id, poliza_id, tipo_siniestro, fecha_siniestro,
+                                    descripcion, numero_denuncia)
+           VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""",
+        (cliente_id, poliza_id, tipo_siniestro, fecha_siniestro, descripcion, numero_denuncia),
     )
     siniestro_id = cur.fetchone()["id"]
     conn.commit()
