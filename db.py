@@ -633,6 +633,22 @@ def actualizar_estado_siniestro(siniestro_id, nuevo_estado):
     conn.close()
 
 
+def actualizar_siniestro(siniestro_id, tipo_siniestro, fecha_siniestro, descripcion,
+                          numero_denuncia, estado):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """UPDATE siniestros
+           SET tipo_siniestro = %s, fecha_siniestro = %s, descripcion = %s,
+               numero_denuncia = %s, estado = %s
+           WHERE id = %s""",
+        (tipo_siniestro, fecha_siniestro, descripcion, numero_denuncia, estado, siniestro_id),
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
 def eliminar_siniestro(siniestro_id):
     conn = get_connection()
     cur = conn.cursor()
@@ -640,3 +656,15 @@ def eliminar_siniestro(siniestro_id):
     conn.commit()
     cur.close()
     conn.close()
+
+
+def contar_siniestros_abiertos():
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT COUNT(*) AS total FROM siniestros WHERE estado NOT IN ('Cerrado', 'Rechazado')"
+    )
+    total = cur.fetchone()["total"]
+    cur.close()
+    conn.close()
+    return total

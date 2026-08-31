@@ -26,10 +26,19 @@ db.init_db()
 st.markdown(
     """
     <style>
-    /* Barra lateral con fondo suave */
+    /* Barra lateral con fondo suave a tono con la paleta */
     section[data-testid="stSidebar"] {
-        background-color: #f5f7fa;
-        border-right: 1px solid #e3e7ee;
+        background-color: #F4F2FF;
+        border-right: 1px solid #E4DFFB;
+    }
+
+    /* Acento de color debajo del título principal, con jerarquía tipográfica */
+    h1 {
+        border-bottom: 3px solid #5B48EE;
+        padding-bottom: 8px;
+        display: inline-block;
+        font-weight: 800 !important;
+        letter-spacing: -0.5px;
     }
 
     /* Tarjetas de métricas (st.metric) con borde y sombra suave */
@@ -54,8 +63,7 @@ st.markdown(
         overflow: hidden;
     }
 
-    /* Jerarquía tipográfica de títulos */
-    h1 { font-weight: 800 !important; letter-spacing: -0.5px; }
+    /* Jerarquía tipográfica de subtítulos */
     h2, h3 { font-weight: 700 !important; }
 
     /* Botones con esquinas más redondeadas */
@@ -97,10 +105,18 @@ def badge(color: str) -> str:
 # SIDEBAR / NAVEGACIÓN
 # ---------------------------------------------------------------------------
 st.sidebar.title("📋 CRM Seguros")
-pagina = st.sidebar.radio(
-    "Navegación",
-    ["📊 Dashboard", "📥 Cargar Póliza", "👥 Clientes", "💰 Cobranzas", "🚨 Siniestros"],
-)
+
+_siniestros_abiertos_count = db.contar_siniestros_abiertos()
+_opciones_nav = ["📊 Dashboard", "📥 Cargar Póliza", "👥 Clientes", "💰 Cobranzas", "🚨 Siniestros"]
+
+
+def _formato_nav(opcion):
+    if opcion == "🚨 Siniestros" and _siniestros_abiertos_count > 0:
+        return f"🚨 Siniestros ({_siniestros_abiertos_count})"
+    return opcion
+
+
+pagina = st.sidebar.radio("Navegación", _opciones_nav, format_func=_formato_nav)
 
 if not os.environ.get("GOOGLE_API_KEY"):
     st.sidebar.warning(
@@ -137,12 +153,26 @@ else:
 if pagina == "📊 Dashboard":
     st.title("📊 Tablero de Vencimientos")
 
+    if _siniestros_abiertos_count > 0:
+        st.warning(
+            f"🚨 Tenés **{_siniestros_abiertos_count} siniestro(s) en proceso**. "
+            "Revisalos en la sección '🚨 Siniestros' del menú."
+        )
+
+    polizas = db.listar_polizas_dashboard()
+    df_polizas_completo = pd.DataFrame(polizas) if polizas else pd.DataFrame()
+    proximos_30_dias = (
+        df_polizas_completo["color"].isin(["amarillo", "rojo"]).sum()
+        if not df_polizas_completo.empty else 0
+    )
+
     metricas = db.metricas_generales()
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("👥 Total Clientes", metricas["total_clientes"])
     m2.metric("📄 Pólizas Vigentes", metricas["polizas_vigentes"])
-    m3.metric("💵 Prima Total", f"${metricas['prima_total']:,.0f}")
-    m4.metric("📊 Prima Promedio", f"${metricas['prima_promedio']:,.0f}")
+    m3.metric("🔔 Próx. Vencimientos (30d)", proximos_30_dias)
+    m4.metric("💵 Prima Total", f"${metricas['prima_total']:,.0f}")
+    m5.metric("📊 Prima Promedio", f"${metricas['prima_promedio']:,.0f}")
 
     ramo_data = db.distribucion_por_ramo()
     aseg_data = db.distribucion_por_aseguradora()
@@ -165,12 +195,10 @@ if pagina == "📊 Dashboard":
 
     st.divider()
 
-    polizas = db.listar_polizas_dashboard()
-
     if not polizas:
         st.info("Todavía no cargaste ninguna póliza. Andá a '📥 Cargar Póliza'.")
     else:
-        df = pd.DataFrame(polizas)
+        df = df_polizas_completo
 
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("🟢 Vigentes", (df["color"] == "verde").sum())
@@ -689,7 +717,7 @@ elif pagina == "🚨 Siniestros":
             if s["estado"] not in filtro_estado:
                 continue
             with st.container(border=True):
-                sc1, sc2, sc3 = st.columns([3, 2, 2])
+                sc1, sc2, sc3, sc4 = st.columns([3, 2, 1.6, 1.2])
                 sc1.markdown(f"**{s['nombre_razon_social']}** — {s['cuit_dni']}")
                 sc1.caption(
                     f"{s['tipo_siniestro'] or '-'} · "
@@ -713,3 +741,59 @@ elif pagina == "🚨 Siniestros":
                     db.actualizar_estado_siniestro(s["id"], nuevo_estado)
                     st.rerun()
                 sc3.caption(f"{ESTADO_ICONO.get(s['estado'], '')} {s['estado']}")
+
+                confirm_key_sin = f"confirmar_borrar_siniestro_{s['id']}"
+                if st.session_state.get(confirm_key_sin):
+                    sc4.caption("¿Seguro?")
+                    if sc4.button("✅ Sí, borrar", key=f"si_sin_{s['id']}"):
+                        db.eliminar_siniestro(s["id"])
+                        st.session_state.pop(confirm_key_sin, None)
+                        st.rerun()
+                    if sc4.button("Cancelar", key=f"no_sin_{s['id']}"):
+                        st.session_state.pop(confirm_key_sin, None)
+                        st.rerun()
+                else:
+                    if sc4.button("🗑️ Eliminar", key=f"del_sin_{s['id']}"):
+                        st.session_state[confirm_key_sin] = True
+                        st.rerun()
+
+                editar_key_sin = f"mostrar_editar_sin_{s['id']}"
+                if sc4.button("✏️ Editar", key=f"btn_editar_sin_{s['id']}"):
+                    st.session_state[editar_key_sin] = not st.session_state.get(editar_key_sin, False)
+                    st.rerun()
+
+                if st.session_state.get(editar_key_sin):
+                    with st.form(f"form_editar_sin_{s['id']}"):
+                        esf1, esf2 = st.columns(2)
+                        ed_tipo = esf1.selectbox(
+                            "Tipo de siniestro",
+                            ["Choque", "Robo/Hurto", "Incendio", "Granizo", "Rotura de cristales",
+                             "Responsabilidad Civil", "Daños por agua", "Otro"],
+                            index=(
+                                ["Choque", "Robo/Hurto", "Incendio", "Granizo", "Rotura de cristales",
+                                 "Responsabilidad Civil", "Daños por agua", "Otro"].index(s["tipo_siniestro"])
+                                if s["tipo_siniestro"] in
+                                ["Choque", "Robo/Hurto", "Incendio", "Granizo", "Rotura de cristales",
+                                 "Responsabilidad Civil", "Daños por agua", "Otro"] else 0
+                            ),
+                        )
+                        ed_fecha = esf2.text_input(
+                            "Fecha del siniestro (YYYY-MM-DD)", value=s["fecha_siniestro"] or ""
+                        )
+                        ed_denuncia = st.text_input(
+                            "N° de denuncia en la aseguradora", value=s.get("numero_denuncia") or ""
+                        )
+                        ed_descripcion = st.text_area("Descripción / detalle", value=s["descripcion"] or "")
+                        confirmar_editar_sin = st.form_submit_button("💾 Guardar cambios", type="primary")
+                        if confirmar_editar_sin:
+                            db.actualizar_siniestro(
+                                siniestro_id=s["id"],
+                                tipo_siniestro=ed_tipo,
+                                fecha_siniestro=ed_fecha,
+                                descripcion=ed_descripcion,
+                                numero_denuncia=ed_denuncia or None,
+                                estado=s["estado"],
+                            )
+                            st.session_state.pop(editar_key_sin, None)
+                            st.success("Siniestro actualizado correctamente.")
+                            st.rerun()
