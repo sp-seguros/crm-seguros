@@ -110,6 +110,28 @@ def init_db():
             estado TEXT CHECK(estado IN ('Denunciado','En revision','Pendiente liquidacion','Cerrado','Rechazado')) DEFAULT 'Denunciado',
             fecha_carga TIMESTAMP DEFAULT NOW()
         );
+
+        CREATE TABLE IF NOT EXISTS interacciones (
+            id SERIAL PRIMARY KEY,
+            cliente_id INTEGER NOT NULL REFERENCES clientes(id) ON DELETE CASCADE,
+            tipo_evento TEXT CHECK(tipo_evento IN ('Reunion','Llamada/WhatsApp','Cotizacion enviada','Nota interna')),
+            ramo_producto TEXT,
+            monto_cotizado REAL,
+            resultado TEXT CHECK(resultado IN ('Aceptada','Rechazada por precio','Pendiente de decision','Sin respuesta') OR resultado IS NULL),
+            detalle TEXT,
+            fecha TEXT,
+            fecha_carga TIMESTAMP DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS tareas (
+            id SERIAL PRIMARY KEY,
+            cliente_id INTEGER REFERENCES clientes(id) ON DELETE SET NULL,
+            titulo TEXT NOT NULL,
+            fecha_limite TEXT,
+            prioridad TEXT CHECK(prioridad IN ('Alta','Media','Baja')) DEFAULT 'Media',
+            estado TEXT CHECK(estado IN ('Pendiente','En proceso','Completada')) DEFAULT 'Pendiente',
+            fecha_carga TIMESTAMP DEFAULT NOW()
+        );
         """
     )
     # Migración: agrega columnas nuevas a tablas que ya existían de versiones anteriores
@@ -698,6 +720,207 @@ def contar_siniestros_abiertos():
     cur = conn.cursor()
     cur.execute(
         "SELECT COUNT(*) AS total FROM siniestros WHERE estado NOT IN ('Cerrado', 'Rechazado')"
+    )
+    total = cur.fetchone()["total"]
+    cur.close()
+    conn.close()
+    return total
+
+
+# ---------------------------------------------------------------------------
+# INTERACCIONES / COTIZACIONES (Historial comercial del cliente)
+# ---------------------------------------------------------------------------
+
+def insertar_interaccion(cliente_id, tipo_evento, ramo_producto=None,
+                          monto_cotizado=None, resultado=None, detalle=None,
+                          fecha=None):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """INSERT INTO interacciones
+           (cliente_id, tipo_evento, ramo_producto, monto_cotizado, resultado, detalle, fecha)
+           VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+        (cliente_id, tipo_evento, ramo_producto or None, monto_cotizado, resultado or None,
+         detalle or None, fecha or date.today().strftime("%Y-%m-%d")),
+    )
+    interaccion_id = cur.fetchone()["id"]
+    conn.commit()
+    cur.close()
+    conn.close()
+    return interaccion_id
+
+
+def listar_interacciones_cliente(cliente_id):
+    """Línea de tiempo cronológica (más reciente primero) para la ficha del cliente."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """SELECT * FROM interacciones
+           WHERE cliente_id = %s
+           ORDER BY fecha DESC NULLS LAST, fecha_carga DESC""",
+        (cliente_id,),
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def eliminar_interaccion(interaccion_id):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM interacciones WHERE id = %s", (interaccion_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def detectar_oportunidades_venta_cruzada(cliente_id):
+    """
+    Alerta de venta cruzada basada en una regla simple y transparente
+    (SIN IA/ML): compara los ramos de las pólizas ACTIVAS del cliente
+    contra los ramos que se le cotizaron (tipo_evento = 'Cotizacion
+    enviada') con resultado 'Rechazada por precio', 'Pendiente de
+    decision' o 'Sin respuesta'. Si un ramo cotizado no forma parte de
+    sus pólizas activas, se reporta como oportunidad abierta.
+
+    Devuelve una lista de dicts: {ramo, resultado, fecha, monto_cotizado},
+    con la cotización más reciente por cada ramo en esa condición.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT DISTINCT ramo FROM polizas WHERE cliente_id = %s AND estado = 'Activa'",
+        (cliente_id,),
+    )
+    ramos_contratados = {
+        (r["ramo"] or "").strip().lower() for r in cur.fetchall() if r["ramo"]
+    }
+
+    cur.execute(
+        """SELECT * FROM interacciones
+           WHERE cliente_id = %s AND tipo_evento = 'Cotizacion enviada'
+             AND resultado IN ('Rechazada por precio','Pendiente de decision','Sin respuesta')
+             AND ramo_producto IS NOT NULL AND ramo_producto != ''
+           ORDER BY fecha DESC NULLS LAST, fecha_carga DESC""",
+        (cliente_id,),
+    )
+    filas = [dict(r) for r in cur.fetchall()]
+    cur.close()
+    conn.close()
+
+    oportunidades = {}
+    for f in filas:
+        ramo_norm = f["ramo_producto"].strip().lower()
+        if ramo_norm in ramos_contratados:
+            continue
+        if ramo_norm not in oportunidades:  # la primera es la más reciente (ya viene ordenado)
+            oportunidades[ramo_norm] = {
+                "ramo": f["ramo_producto"],
+                "resultado": f["resultado"],
+                "fecha": f["fecha"],
+                "monto_cotizado": f["monto_cotizado"],
+            }
+    return list(oportunidades.values())
+
+
+# ---------------------------------------------------------------------------
+# TAREAS Y SEGUIMIENTOS
+# ---------------------------------------------------------------------------
+
+def insertar_tarea(titulo, cliente_id=None, fecha_limite=None,
+                    prioridad="Media", estado="Pendiente"):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """INSERT INTO tareas (cliente_id, titulo, fecha_limite, prioridad, estado)
+           VALUES (%s, %s, %s, %s, %s) RETURNING id""",
+        (cliente_id, titulo, fecha_limite or None, prioridad, estado),
+    )
+    tarea_id = cur.fetchone()["id"]
+    conn.commit()
+    cur.close()
+    conn.close()
+    return tarea_id
+
+
+def listar_tareas():
+    """Todas las tareas, con nombre del cliente asociado (si tiene), ordenadas
+    por fecha límite (las sin fecha al final) y luego por prioridad."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """SELECT t.*, c.nombre_razon_social
+           FROM tareas t
+           LEFT JOIN clientes c ON c.id = t.cliente_id
+           ORDER BY
+             CASE WHEN t.fecha_limite IS NULL OR t.fecha_limite = '' THEN 1 ELSE 0 END,
+             t.fecha_limite ASC,
+             CASE t.prioridad WHEN 'Alta' THEN 0 WHEN 'Media' THEN 1 ELSE 2 END"""
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def actualizar_tarea(tarea_id, titulo, cliente_id, fecha_limite, prioridad, estado):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """UPDATE tareas
+           SET titulo = %s, cliente_id = %s, fecha_limite = %s,
+               prioridad = %s, estado = %s
+           WHERE id = %s""",
+        (titulo, cliente_id, fecha_limite or None, prioridad, estado, tarea_id),
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def actualizar_estado_tarea(tarea_id, nuevo_estado):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("UPDATE tareas SET estado = %s WHERE id = %s", (nuevo_estado, tarea_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def eliminar_tarea(tarea_id):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM tareas WHERE id = %s", (tarea_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def contar_tareas_hoy():
+    """Tareas con vencimiento hoy que todavía no están completadas (para el badge del menú)."""
+    conn = get_connection()
+    cur = conn.cursor()
+    hoy = date.today().strftime("%Y-%m-%d")
+    cur.execute(
+        "SELECT COUNT(*) AS total FROM tareas WHERE fecha_limite = %s AND estado != 'Completada'",
+        (hoy,),
+    )
+    total = cur.fetchone()["total"]
+    cur.close()
+    conn.close()
+    return total
+
+
+def contar_tareas_vencidas():
+    conn = get_connection()
+    cur = conn.cursor()
+    hoy = date.today().strftime("%Y-%m-%d")
+    cur.execute(
+        """SELECT COUNT(*) AS total FROM tareas
+           WHERE fecha_limite IS NOT NULL AND fecha_limite != '' AND fecha_limite < %s
+             AND estado != 'Completada'""",
+        (hoy,),
     )
     total = cur.fetchone()["total"]
     cur.close()
