@@ -132,6 +132,22 @@ def init_db():
             estado TEXT CHECK(estado IN ('Pendiente','En proceso','Completada')) DEFAULT 'Pendiente',
             fecha_carga TIMESTAMP DEFAULT NOW()
         );
+
+        CREATE TABLE IF NOT EXISTS oportunidades (
+            id SERIAL PRIMARY KEY,
+            nombre_prospecto TEXT NOT NULL,
+            telefono TEXT,
+            email TEXT,
+            origen TEXT CHECK(origen IN ('Referido','Redes sociales','Web','Cartera fria','Otro')),
+            ramo_interes TEXT,
+            monto_estimado REAL,
+            etapa TEXT CHECK(etapa IN ('Lead','Contactado','Cotizacion enviada','Negociacion','Cerrado','Perdido')) DEFAULT 'Lead',
+            motivo_perdida TEXT,
+            notas TEXT,
+            cliente_id INTEGER REFERENCES clientes(id) ON DELETE SET NULL,
+            fecha_carga TIMESTAMP DEFAULT NOW(),
+            fecha_actualizacion TIMESTAMP DEFAULT NOW()
+        );
         """
     )
     # Migración: agrega columnas nuevas a tablas que ya existían de versiones anteriores
@@ -728,20 +744,18 @@ def contar_siniestros_abiertos():
 
 
 # ---------------------------------------------------------------------------
-# INTERACCIONES / COTIZACIONES (Historial comercial del cliente)
+# HISTORIAL DE INTERACCIONES Y COTIZACIONES
 # ---------------------------------------------------------------------------
 
-def insertar_interaccion(cliente_id, tipo_evento, ramo_producto=None,
-                          monto_cotizado=None, resultado=None, detalle=None,
-                          fecha=None):
+def insertar_interaccion(cliente_id, tipo_evento, ramo_producto, monto_cotizado,
+                          resultado, detalle, fecha):
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
         """INSERT INTO interacciones
            (cliente_id, tipo_evento, ramo_producto, monto_cotizado, resultado, detalle, fecha)
            VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id""",
-        (cliente_id, tipo_evento, ramo_producto or None, monto_cotizado, resultado or None,
-         detalle or None, fecha or date.today().strftime("%Y-%m-%d")),
+        (cliente_id, tipo_evento, ramo_producto, monto_cotizado, resultado, detalle, fecha),
     )
     interaccion_id = cur.fetchone()["id"]
     conn.commit()
@@ -751,13 +765,11 @@ def insertar_interaccion(cliente_id, tipo_evento, ramo_producto=None,
 
 
 def listar_interacciones_cliente(cliente_id):
-    """Línea de tiempo cronológica (más reciente primero) para la ficha del cliente."""
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
-        """SELECT * FROM interacciones
-           WHERE cliente_id = %s
-           ORDER BY fecha DESC NULLS LAST, fecha_carga DESC""",
+        """SELECT * FROM interacciones WHERE cliente_id = %s
+           ORDER BY fecha DESC, fecha_carga DESC""",
         (cliente_id,),
     )
     rows = cur.fetchall()
@@ -775,67 +787,52 @@ def eliminar_interaccion(interaccion_id):
     conn.close()
 
 
-def detectar_oportunidades_venta_cruzada(cliente_id):
+def detectar_oportunidades_cliente(cliente_id):
     """
-    Alerta de venta cruzada basada en una regla simple y transparente
-    (SIN IA/ML): compara los ramos de las pólizas ACTIVAS del cliente
-    contra los ramos que se le cotizaron (tipo_evento = 'Cotizacion
-    enviada') con resultado 'Rechazada por precio', 'Pendiente de
-    decision' o 'Sin respuesta'. Si un ramo cotizado no forma parte de
-    sus pólizas activas, se reporta como oportunidad abierta.
-
-    Devuelve una lista de dicts: {ramo, resultado, fecha, monto_cotizado},
-    con la cotización más reciente por cada ramo en esa condición.
+    Regla simple y transparente de venta cruzada (sin IA): busca cotizaciones
+    de un ramo que el cliente NO tiene contratado hoy en una póliza activa,
+    y cuyo resultado quedó en 'Rechazada por precio', 'Pendiente de decision'
+    o 'Sin respuesta'. Devuelve una lista de alertas con el ramo y hace
+    cuánto se cotizó.
     """
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT DISTINCT ramo FROM polizas WHERE cliente_id = %s AND estado = 'Activa'",
-        (cliente_id,),
-    )
+    polizas_activas = historial_polizas_cliente(cliente_id)
     ramos_contratados = {
-        (r["ramo"] or "").strip().lower() for r in cur.fetchall() if r["ramo"]
+        (p["ramo"] or "").strip().upper() for p in polizas_activas if p["estado"] == "Activa"
     }
 
-    cur.execute(
-        """SELECT * FROM interacciones
-           WHERE cliente_id = %s AND tipo_evento = 'Cotizacion enviada'
-             AND resultado IN ('Rechazada por precio','Pendiente de decision','Sin respuesta')
-             AND ramo_producto IS NOT NULL AND ramo_producto != ''
-           ORDER BY fecha DESC NULLS LAST, fecha_carga DESC""",
-        (cliente_id,),
-    )
-    filas = [dict(r) for r in cur.fetchall()]
-    cur.close()
-    conn.close()
-
-    oportunidades = {}
-    for f in filas:
-        ramo_norm = f["ramo_producto"].strip().lower()
-        if ramo_norm in ramos_contratados:
+    interacciones = listar_interacciones_cliente(cliente_id)
+    oportunidades = []
+    vistos = set()
+    for i in interacciones:
+        if i["tipo_evento"] != "Cotizacion enviada":
             continue
-        if ramo_norm not in oportunidades:  # la primera es la más reciente (ya viene ordenado)
-            oportunidades[ramo_norm] = {
-                "ramo": f["ramo_producto"],
-                "resultado": f["resultado"],
-                "fecha": f["fecha"],
-                "monto_cotizado": f["monto_cotizado"],
-            }
-    return list(oportunidades.values())
+        if i["resultado"] not in ("Rechazada por precio", "Pendiente de decision", "Sin respuesta"):
+            continue
+        ramo = (i["ramo_producto"] or "").strip()
+        if not ramo or ramo.upper() in ramos_contratados:
+            continue
+        if ramo.upper() in vistos:
+            continue
+        vistos.add(ramo.upper())
+        oportunidades.append({
+            "ramo": ramo,
+            "fecha": i["fecha"],
+            "resultado": i["resultado"],
+        })
+    return oportunidades
 
 
 # ---------------------------------------------------------------------------
 # TAREAS Y SEGUIMIENTOS
 # ---------------------------------------------------------------------------
 
-def insertar_tarea(titulo, cliente_id=None, fecha_limite=None,
-                    prioridad="Media", estado="Pendiente"):
+def insertar_tarea(cliente_id, titulo, fecha_limite, prioridad):
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
-        """INSERT INTO tareas (cliente_id, titulo, fecha_limite, prioridad, estado)
-           VALUES (%s, %s, %s, %s, %s) RETURNING id""",
-        (cliente_id, titulo, fecha_limite or None, prioridad, estado),
+        """INSERT INTO tareas (cliente_id, titulo, fecha_limite, prioridad)
+           VALUES (%s, %s, %s, %s) RETURNING id""",
+        (cliente_id, titulo, fecha_limite, prioridad),
     )
     tarea_id = cur.fetchone()["id"]
     conn.commit()
@@ -845,38 +842,18 @@ def insertar_tarea(titulo, cliente_id=None, fecha_limite=None,
 
 
 def listar_tareas():
-    """Todas las tareas, con nombre del cliente asociado (si tiene), ordenadas
-    por fecha límite (las sin fecha al final) y luego por prioridad."""
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
         """SELECT t.*, c.nombre_razon_social
            FROM tareas t
            LEFT JOIN clientes c ON c.id = t.cliente_id
-           ORDER BY
-             CASE WHEN t.fecha_limite IS NULL OR t.fecha_limite = '' THEN 1 ELSE 0 END,
-             t.fecha_limite ASC,
-             CASE t.prioridad WHEN 'Alta' THEN 0 WHEN 'Media' THEN 1 ELSE 2 END"""
+           ORDER BY t.fecha_limite ASC NULLS LAST"""
     )
     rows = cur.fetchall()
     cur.close()
     conn.close()
     return [dict(r) for r in rows]
-
-
-def actualizar_tarea(tarea_id, titulo, cliente_id, fecha_limite, prioridad, estado):
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute(
-        """UPDATE tareas
-           SET titulo = %s, cliente_id = %s, fecha_limite = %s,
-               prioridad = %s, estado = %s
-           WHERE id = %s""",
-        (titulo, cliente_id, fecha_limite or None, prioridad, estado, tarea_id),
-    )
-    conn.commit()
-    cur.close()
-    conn.close()
 
 
 def actualizar_estado_tarea(tarea_id, nuevo_estado):
@@ -897,32 +874,113 @@ def eliminar_tarea(tarea_id):
     conn.close()
 
 
-def contar_tareas_hoy():
-    """Tareas con vencimiento hoy que todavía no están completadas (para el badge del menú)."""
-    conn = get_connection()
-    cur = conn.cursor()
-    hoy = date.today().strftime("%Y-%m-%d")
-    cur.execute(
-        "SELECT COUNT(*) AS total FROM tareas WHERE fecha_limite = %s AND estado != 'Completada'",
-        (hoy,),
-    )
-    total = cur.fetchone()["total"]
-    cur.close()
-    conn.close()
-    return total
-
-
-def contar_tareas_vencidas():
+def contar_tareas_hoy_y_vencidas():
+    """Cuenta tareas no completadas con vencimiento hoy o ya pasado (vencidas)."""
     conn = get_connection()
     cur = conn.cursor()
     hoy = date.today().strftime("%Y-%m-%d")
     cur.execute(
         """SELECT COUNT(*) AS total FROM tareas
-           WHERE fecha_limite IS NOT NULL AND fecha_limite != '' AND fecha_limite < %s
-             AND estado != 'Completada'""",
+           WHERE estado != 'Completada' AND fecha_limite IS NOT NULL AND fecha_limite <= %s""",
         (hoy,),
     )
     total = cur.fetchone()["total"]
     cur.close()
     conn.close()
     return total
+
+
+# ---------------------------------------------------------------------------
+# PIPELINE DE PROSPECCIÓN (oportunidades comerciales)
+# ---------------------------------------------------------------------------
+
+ETAPAS_PIPELINE = ["Lead", "Contactado", "Cotizacion enviada", "Negociacion", "Cerrado", "Perdido"]
+
+
+def insertar_oportunidad(nombre_prospecto, telefono, email, origen, ramo_interes,
+                          monto_estimado, notas):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """INSERT INTO oportunidades
+           (nombre_prospecto, telefono, email, origen, ramo_interes, monto_estimado, notas)
+           VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+        (nombre_prospecto, telefono, email, origen, ramo_interes, monto_estimado, notas),
+    )
+    oportunidad_id = cur.fetchone()["id"]
+    conn.commit()
+    cur.close()
+    conn.close()
+    return oportunidad_id
+
+
+def listar_oportunidades():
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM oportunidades ORDER BY fecha_actualizacion DESC")
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def actualizar_etapa_oportunidad(oportunidad_id, nueva_etapa, motivo_perdida=None):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """UPDATE oportunidades
+           SET etapa = %s, motivo_perdida = %s, fecha_actualizacion = NOW()
+           WHERE id = %s""",
+        (nueva_etapa, motivo_perdida, oportunidad_id),
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def eliminar_oportunidad(oportunidad_id):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM oportunidades WHERE id = %s", (oportunidad_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def convertir_oportunidad_a_cliente(oportunidad_id):
+    """
+    Convierte una oportunidad ganada en un cliente real de la cartera
+    (vinculándolo por si ya existiera un cliente con ese teléfono/email no
+    aplica automáticamente por CUIT porque el lead todavía no tiene uno:
+    se crea el cliente con los datos disponibles y se puede completar el
+    CUIT/DNI después, al cargarle la primera póliza).
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM oportunidades WHERE id = %s", (oportunidad_id,))
+    op = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not op:
+        raise ValueError("No se encontró la oportunidad.")
+
+    # CUIT/DNI temporal único, para que no choque con el UNIQUE de la tabla;
+    # el usuario lo puede corregir después desde la ficha del cliente.
+    cuit_temporal = f"PROSPECTO-{oportunidad_id}"
+    cliente_id = upsert_cliente(
+        nombre=op["nombre_prospecto"],
+        cuit_dni=cuit_temporal,
+        telefono=op["telefono"],
+        email=op["email"],
+    )
+
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE oportunidades SET etapa = 'Cerrado', cliente_id = %s, fecha_actualizacion = NOW() WHERE id = %s",
+        (cliente_id, oportunidad_id),
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+    return cliente_id

@@ -147,9 +147,9 @@ def estado_vacio(icono: str, mensaje: str):
 st.sidebar.title("📋 CRM Seguros")
 
 _siniestros_abiertos_count = db.contar_siniestros_abiertos()
-_tareas_hoy_count = db.contar_tareas_hoy()
+_tareas_pendientes_count = db.contar_tareas_hoy_y_vencidas()
 _opciones_nav = [
-    "📊 Dashboard", "📥 Cargar Póliza", "👥 Clientes", "💰 Cobranzas",
+    "📊 Dashboard", "🎯 Pipeline", "📥 Cargar Póliza", "👥 Clientes", "💰 Cobranzas",
     "🚨 Siniestros", "🗓️ Tareas",
 ]
 
@@ -157,8 +157,8 @@ _opciones_nav = [
 def _formato_nav(opcion):
     if opcion == "🚨 Siniestros" and _siniestros_abiertos_count > 0:
         return f"🚨 Siniestros ({_siniestros_abiertos_count})"
-    if opcion == "🗓️ Tareas" and _tareas_hoy_count > 0:
-        return f"🗓️ Tareas ({_tareas_hoy_count})"
+    if opcion == "🗓️ Tareas" and _tareas_pendientes_count > 0:
+        return f"🗓️ Tareas ({_tareas_pendientes_count})"
     return opcion
 
 
@@ -204,9 +204,10 @@ if pagina == "📊 Dashboard":
             f"🚨 Tenés **{_siniestros_abiertos_count} siniestro(s) en proceso**. "
             "Revisalos en la sección '🚨 Siniestros' del menú."
         )
-    if _tareas_hoy_count > 0:
-        st.info(
-            f"🗓️ Tenés **{_tareas_hoy_count} tarea(s) para hoy**. "
+
+    if _tareas_pendientes_count > 0:
+        st.warning(
+            f"🗓️ Tenés **{_tareas_pendientes_count} tarea(s) pendiente(s) o vencida(s)**. "
             "Revisalas en la sección '🗓️ Tareas' del menú."
         )
 
@@ -487,6 +488,80 @@ elif pagina == "👥 Clientes":
                 if siniestros_cliente:
                     st.caption(f"🚨 {len(siniestros_cliente)} siniestro(s) — {siniestros_abiertos} abierto(s)")
 
+                st.divider()
+                st.markdown("**📜 Historial y Cotizaciones**")
+
+                oportunidades = db.detectar_oportunidades_cliente(cliente["id"])
+                for op in oportunidades:
+                    st.info(
+                        f"💡 **Oportunidad de venta cruzada**: cotizó **{op['ramo']}** "
+                        f"el {op['fecha'] or '-'} (resultado: {op['resultado']}) y no tiene "
+                        f"una póliza activa de ese ramo. Puede valer la pena retomar el contacto."
+                    )
+
+                with st.expander("➕ Registrar interacción / cotización"):
+                    with st.form(f"form_interaccion_{cliente['id']}"):
+                        if1, if2 = st.columns(2)
+                        tipo_evento = if1.selectbox(
+                            "Tipo de evento",
+                            ["Reunion", "Llamada/WhatsApp", "Cotizacion enviada", "Nota interna"],
+                            key=f"tipo_evento_{cliente['id']}",
+                        )
+                        fecha_interaccion = if2.text_input(
+                            "Fecha (YYYY-MM-DD)", value=date.today().strftime("%Y-%m-%d"),
+                            key=f"fecha_interaccion_{cliente['id']}",
+                        )
+                        ramo_producto = if1.text_input(
+                            "Ramo / producto cotizado (si aplica)", key=f"ramo_prod_{cliente['id']}"
+                        )
+                        monto_cotizado = if2.number_input(
+                            "Monto / prima cotizada (opcional)", min_value=0.0, step=100.0,
+                            key=f"monto_cot_{cliente['id']}",
+                        )
+                        resultado = st.selectbox(
+                            "Resultado / feedback",
+                            ["", "Aceptada", "Rechazada por precio", "Pendiente de decision", "Sin respuesta"],
+                            key=f"resultado_{cliente['id']}",
+                        )
+                        detalle_interaccion = st.text_area(
+                            "Detalles / resumen de la conversación", key=f"detalle_int_{cliente['id']}"
+                        )
+                        guardar_interaccion = st.form_submit_button("💾 Guardar", type="primary")
+                        if guardar_interaccion:
+                            db.insertar_interaccion(
+                                cliente_id=cliente["id"],
+                                tipo_evento=tipo_evento,
+                                ramo_producto=ramo_producto or None,
+                                monto_cotizado=monto_cotizado or None,
+                                resultado=resultado or None,
+                                detalle=detalle_interaccion or None,
+                                fecha=fecha_interaccion,
+                            )
+                            st.success("Interacción registrada.")
+                            st.rerun()
+
+                interacciones_cliente = db.listar_interacciones_cliente(cliente["id"])
+                if interacciones_cliente:
+                    for inter in interacciones_cliente:
+                        ic1, ic2 = st.columns([5, 1])
+                        linea = f"**{inter['fecha'] or '-'}** · {inter['tipo_evento']}"
+                        if inter["ramo_producto"]:
+                            linea += f" · {inter['ramo_producto']}"
+                        if inter["monto_cotizado"]:
+                            linea += f" · ${inter['monto_cotizado']:,.2f}"
+                        if inter["resultado"]:
+                            linea += f" · _{inter['resultado']}_"
+                        ic1.markdown(linea)
+                        if inter["detalle"]:
+                            ic1.caption(inter["detalle"])
+                        if ic2.button("🗑️", key=f"del_inter_{inter['id']}", help="Eliminar este registro"):
+                            db.eliminar_interaccion(inter["id"])
+                            st.rerun()
+                else:
+                    st.caption("Sin interacciones registradas todavía.")
+
+                st.divider()
+
                 polizas = polizas_cliente
                 if polizas:
                     for poliza in polizas:
@@ -647,101 +722,6 @@ elif pagina == "👥 Clientes":
                         st.divider()
                 else:
                     st.caption("Sin pólizas cargadas todavía.")
-
-                # -----------------------------------------------------------
-                # Historial de Interacciones / Cotizaciones + Perfil Comercial
-                # -----------------------------------------------------------
-                st.subheader("🗒️ Historial y Cotizaciones")
-
-                oportunidades = db.detectar_oportunidades_venta_cruzada(cliente["id"])
-                if oportunidades:
-                    for op in oportunidades:
-                        monto_txt = f" (${op['monto_cotizado']:,.2f})" if op["monto_cotizado"] else ""
-                        st.warning(
-                            f"💡 **Oportunidad de venta cruzada**: cotizó **{op['ramo']}**"
-                            f"{monto_txt} el {op['fecha'] or '-'} — resultado: "
-                            f"*{op['resultado']}*. No tiene una póliza activa de ese ramo."
-                        )
-
-                with st.expander("➕ Registrar interacción / cotización"):
-                    with st.form(f"form_interaccion_{cliente['id']}"):
-                        if1, if2 = st.columns(2)
-                        tipo_evento = if1.selectbox(
-                            "Tipo de evento",
-                            ["Reunion", "Llamada/WhatsApp", "Cotizacion enviada", "Nota interna"],
-                            key=f"tipo_evento_{cliente['id']}",
-                        )
-                        fecha_interaccion = if2.text_input(
-                            "Fecha (YYYY-MM-DD)", value=date.today().strftime("%Y-%m-%d"),
-                            key=f"fecha_inter_{cliente['id']}",
-                        )
-                        ramo_producto = if1.text_input(
-                            "Ramo / Producto cotizado (si aplica)",
-                            placeholder="Ej: Auto, Hogar, Vida, ART",
-                            key=f"ramo_inter_{cliente['id']}",
-                        )
-                        monto_cotizado = if2.number_input(
-                            "Monto / prima cotizada (opcional)", min_value=0.0, step=100.0,
-                            key=f"monto_inter_{cliente['id']}",
-                        )
-                        resultado = st.selectbox(
-                            "Resultado / Feedback",
-                            ["", "Aceptada", "Rechazada por precio", "Pendiente de decision", "Sin respuesta"],
-                            key=f"resultado_inter_{cliente['id']}",
-                        )
-                        detalle = st.text_area(
-                            "Detalle / resumen de la conversación",
-                            key=f"detalle_inter_{cliente['id']}",
-                        )
-                        guardar_interaccion = st.form_submit_button("💾 Guardar", type="primary")
-                        if guardar_interaccion:
-                            db.insertar_interaccion(
-                                cliente_id=cliente["id"],
-                                tipo_evento=tipo_evento,
-                                ramo_producto=ramo_producto or None,
-                                monto_cotizado=monto_cotizado or None,
-                                resultado=resultado or None,
-                                detalle=detalle or None,
-                                fecha=fecha_interaccion or None,
-                            )
-                            st.success("Interacción registrada correctamente.")
-                            st.rerun()
-
-                interacciones_cliente = db.listar_interacciones_cliente(cliente["id"])
-                if not interacciones_cliente:
-                    st.caption("Todavía no hay interacciones registradas con este cliente.")
-                else:
-                    ICONO_EVENTO = {
-                        "Reunion": "🤝", "Llamada/WhatsApp": "💬",
-                        "Cotizacion enviada": "📤", "Nota interna": "📝",
-                    }
-                    RESULTADO_TIPO = {
-                        "Aceptada": "verde", "Rechazada por precio": "rojo",
-                        "Pendiente de decision": "amarillo", "Sin respuesta": "gris",
-                    }
-                    for inter in interacciones_cliente:
-                        ic1, ic2 = st.columns([5, 1])
-                        icono = ICONO_EVENTO.get(inter["tipo_evento"], "•")
-                        linea = f"{icono} **{inter['tipo_evento']}** — {inter['fecha'] or '-'}"
-                        if inter["ramo_producto"]:
-                            linea += f" · {inter['ramo_producto']}"
-                        if inter["monto_cotizado"]:
-                            linea += f" · ${inter['monto_cotizado']:,.2f}"
-                        ic1.markdown(linea)
-                        if inter["detalle"]:
-                            ic1.caption(inter["detalle"])
-                        if inter["resultado"]:
-                            ic1.markdown(
-                                badge_pastel(
-                                    inter["resultado"],
-                                    RESULTADO_TIPO.get(inter["resultado"], "gris"),
-                                ),
-                                unsafe_allow_html=True,
-                            )
-                        if ic2.button("🗑️", key=f"del_inter_{inter['id']}", help="Eliminar"):
-                            db.eliminar_interaccion(inter["id"])
-                            st.rerun()
-                        st.divider()
 
 # ---------------------------------------------------------------------------
 # COBRANZAS
@@ -960,24 +940,20 @@ elif pagina == "🚨 Siniestros":
 elif pagina == "🗓️ Tareas":
     st.title("🗓️ Tareas y Seguimientos")
 
-    clientes_todos_tareas = db.listar_clientes()
-    opciones_cliente_tarea = {"Sin cliente asociado": None}
-    for c in clientes_todos_tareas:
-        opciones_cliente_tarea[f"{c['nombre_razon_social']} — {c['cuit_dni']}"] = c["id"]
-
     with st.expander("➕ Nueva tarea"):
+        clientes_para_tarea = db.listar_clientes()
+        opciones_cliente_tarea = {"Sin cliente asociado": None}
+        for c in clientes_para_tarea:
+            opciones_cliente_tarea[f"{c['nombre_razon_social']} — {c['cuit_dni']}"] = c["id"]
+
         with st.form("form_nueva_tarea"):
             tf1, tf2 = st.columns(2)
-            titulo_tarea = tf1.text_input(
-                "Título", placeholder="Ej: Llamar para recalcular cotización de Auto"
-            )
-            cliente_tarea_sel = tf2.selectbox(
-                "Cliente asociado (opcional)", options=list(opciones_cliente_tarea.keys())
-            )
-            fecha_limite_tarea = tf1.text_input(
+            cliente_tarea_sel = tf1.selectbox("Cliente asociado", options=list(opciones_cliente_tarea.keys()))
+            fecha_limite_tarea = tf2.text_input(
                 "Fecha límite (YYYY-MM-DD)", value=date.today().strftime("%Y-%m-%d")
             )
-            prioridad_tarea = tf2.selectbox("Prioridad", ["Alta", "Media", "Baja"], index=1)
+            titulo_tarea = st.text_input("Título de la tarea", placeholder="Ej: Llamar para renovar póliza")
+            prioridad_tarea = st.selectbox("Prioridad", ["Alta", "Media", "Baja"], index=1)
             guardar_tarea = st.form_submit_button("💾 Guardar tarea", type="primary")
 
             if guardar_tarea:
@@ -985,152 +961,189 @@ elif pagina == "🗓️ Tareas":
                     st.error("El título de la tarea es obligatorio.")
                 else:
                     db.insertar_tarea(
-                        titulo=titulo_tarea,
                         cliente_id=opciones_cliente_tarea[cliente_tarea_sel],
-                        fecha_limite=fecha_limite_tarea or None,
+                        titulo=titulo_tarea,
+                        fecha_limite=fecha_limite_tarea,
                         prioridad=prioridad_tarea,
                     )
-                    st.success("Tarea creada correctamente.")
+                    st.success("Tarea guardada.")
                     st.rerun()
 
     st.divider()
 
-    tareas = db.listar_tareas()
-    if not tareas:
-        estado_vacio("🗓️", "Todavía no hay tareas cargadas.")
+    todas_las_tareas = db.listar_tareas()
+    if not todas_las_tareas:
+        estado_vacio("🗓️", "Todavía no cargaste ninguna tarea.")
     else:
         hoy_str = date.today().strftime("%Y-%m-%d")
 
-        def _es_vencida(t):
-            return (
-                t["fecha_limite"] and t["fecha_limite"] < hoy_str
-                and t["estado"] != "Completada"
-            )
-
-        cant_hoy = sum(1 for t in tareas if t["fecha_limite"] == hoy_str and t["estado"] != "Completada")
-        cant_vencidas = sum(1 for t in tareas if _es_vencida(t))
-        cant_pendientes = sum(1 for t in tareas if t["estado"] != "Completada")
-
-        tm1, tm2, tm3 = st.columns(3)
-        tm1.metric("📌 Pendientes", cant_pendientes)
-        tm2.metric("🗓️ Para hoy", cant_hoy)
-        tm3.metric("🔴 Vencidas", cant_vencidas)
-
-        st.divider()
-
-        filtro_rapido = st.radio(
-            "Filtro rápido",
-            ["Todas", "Tareas de Hoy", "Vencidas", "Por Cliente"],
-            horizontal=True,
+        filtro_tarea = st.radio(
+            "Ver", ["Todas", "De hoy", "Vencidas", "Por cliente"], horizontal=True
         )
 
-        cliente_filtro_sel = None
-        if filtro_rapido == "Por Cliente":
-            cliente_filtro_sel = st.selectbox(
-                "Elegí un cliente", options=list(opciones_cliente_tarea.keys())
-            )
+        tareas_filtradas = todas_las_tareas
+        if filtro_tarea == "De hoy":
+            tareas_filtradas = [t for t in todas_las_tareas if t["fecha_limite"] == hoy_str]
+        elif filtro_tarea == "Vencidas":
+            tareas_filtradas = [
+                t for t in todas_las_tareas
+                if t["fecha_limite"] and t["fecha_limite"] < hoy_str and t["estado"] != "Completada"
+            ]
+        elif filtro_tarea == "Por cliente":
+            nombres_clientes_tarea = sorted({
+                t["nombre_razon_social"] for t in todas_las_tareas if t["nombre_razon_social"]
+            })
+            if nombres_clientes_tarea:
+                cliente_filtro_sel = st.selectbox("Cliente", nombres_clientes_tarea)
+                tareas_filtradas = [
+                    t for t in todas_las_tareas if t["nombre_razon_social"] == cliente_filtro_sel
+                ]
+            else:
+                tareas_filtradas = []
 
-        filtro_estado_tarea = st.multiselect(
-            "Filtrar por estado",
-            ["Pendiente", "En proceso", "Completada"],
-            default=["Pendiente", "En proceso", "Completada"],
-        )
-
-        tareas_filtradas = [t for t in tareas if t["estado"] in filtro_estado_tarea]
-        if filtro_rapido == "Tareas de Hoy":
-            tareas_filtradas = [t for t in tareas_filtradas if t["fecha_limite"] == hoy_str]
-        elif filtro_rapido == "Vencidas":
-            tareas_filtradas = [t for t in tareas_filtradas if _es_vencida(t)]
-        elif filtro_rapido == "Por Cliente" and cliente_filtro_sel:
-            cid = opciones_cliente_tarea[cliente_filtro_sel]
-            tareas_filtradas = [t for t in tareas_filtradas if t["cliente_id"] == cid]
-
-        if not tareas_filtradas:
-            st.caption("No hay tareas que coincidan con este filtro.")
-
-        PRIORIDAD_TIPO = {"Alta": "rojo", "Media": "amarillo", "Baja": "verde"}
+        PRIORIDAD_ICONO = {"Alta": "🔴", "Media": "🟡", "Baja": "🟢"}
         ESTADOS_TAREA = ["Pendiente", "En proceso", "Completada"]
 
+        if not tareas_filtradas:
+            st.caption("No hay tareas para este filtro.")
         for t in tareas_filtradas:
+            vencida = (
+                t["fecha_limite"] and t["fecha_limite"] < hoy_str and t["estado"] != "Completada"
+            )
             with st.container(border=True):
                 tc1, tc2, tc3, tc4 = st.columns([3, 1.5, 1.3, 1])
                 tc1.markdown(f"**{t['titulo']}**")
-                if t.get("nombre_razon_social"):
-                    tc1.caption(f"👤 {t['nombre_razon_social']}")
-                else:
-                    tc1.caption("Sin cliente asociado")
-                tc1.markdown(
-                    badge_pastel(t["prioridad"], PRIORIDAD_TIPO.get(t["prioridad"], "gris")),
-                    unsafe_allow_html=True,
-                )
-
-                if _es_vencida(t):
-                    tc2.markdown("🔴 **Vencida**")
-                tc2.caption(f"Vence: {t['fecha_limite'] or '-'}")
+                tc1.caption(f"👤 {t['nombre_razon_social'] or 'Sin cliente asociado'}")
+                etiqueta_fecha = f"📅 {t['fecha_limite'] or 'sin fecha'}"
+                if vencida:
+                    etiqueta_fecha += " ⚠️ vencida"
+                tc2.caption(etiqueta_fecha)
+                tc2.caption(f"{PRIORIDAD_ICONO.get(t['prioridad'], '')} {t['prioridad']}")
 
                 nuevo_estado_tarea = tc3.selectbox(
                     "Estado", ESTADOS_TAREA,
                     index=ESTADOS_TAREA.index(t["estado"]) if t["estado"] in ESTADOS_TAREA else 0,
-                    key=f"estado_tarea_{t['id']}",
-                    label_visibility="collapsed",
+                    key=f"estado_tarea_{t['id']}", label_visibility="collapsed",
                 )
                 if nuevo_estado_tarea != t["estado"]:
                     db.actualizar_estado_tarea(t["id"], nuevo_estado_tarea)
                     st.rerun()
 
-                confirm_key_tarea = f"confirmar_borrar_tarea_{t['id']}"
-                if st.session_state.get(confirm_key_tarea):
-                    tc4.caption("¿Seguro?")
-                    if tc4.button("✅ Sí", key=f"si_tarea_{t['id']}"):
-                        db.eliminar_tarea(t["id"])
-                        st.session_state.pop(confirm_key_tarea, None)
-                        st.rerun()
-                    if tc4.button("Cancelar", key=f"no_tarea_{t['id']}"):
-                        st.session_state.pop(confirm_key_tarea, None)
-                        st.rerun()
-                else:
-                    if tc4.button("🗑️", key=f"del_tarea_{t['id']}", help="Eliminar"):
-                        st.session_state[confirm_key_tarea] = True
-                        st.rerun()
-
-                editar_key_tarea = f"mostrar_editar_tarea_{t['id']}"
-                if tc4.button("✏️", key=f"btn_editar_tarea_{t['id']}", help="Editar"):
-                    st.session_state[editar_key_tarea] = not st.session_state.get(editar_key_tarea, False)
+                if tc4.button("🗑️", key=f"del_tarea_{t['id']}", help="Eliminar esta tarea"):
+                    db.eliminar_tarea(t["id"])
                     st.rerun()
 
-                if st.session_state.get(editar_key_tarea):
-                    with st.form(f"form_editar_tarea_{t['id']}"):
-                        etf1, etf2 = st.columns(2)
-                        ed_titulo_tarea = etf1.text_input("Título", value=t["titulo"])
-                        opciones_cliente_actual = list(opciones_cliente_tarea.keys())
-                        cliente_actual_nombre = next(
-                            (k for k, v in opciones_cliente_tarea.items() if v == t["cliente_id"]),
-                            "Sin cliente asociado",
+# ---------------------------------------------------------------------------
+# PIPELINE DE PROSPECCIÓN
+# ---------------------------------------------------------------------------
+elif pagina == "🎯 Pipeline":
+    st.title("🎯 Pipeline de Prospección")
+    st.caption(
+        "Seguimiento de leads y oportunidades comerciales, desde el primer contacto "
+        "hasta que se convierten en cliente (o se pierden)."
+    )
+
+    with st.expander("➕ Nuevo lead / oportunidad"):
+        with st.form("form_nueva_oportunidad"):
+            of1, of2 = st.columns(2)
+            nombre_prospecto = of1.text_input("Nombre del prospecto")
+            telefono_prospecto = of2.text_input("Teléfono")
+            email_prospecto = of1.text_input("Email (opcional)")
+            origen_prospecto = of2.selectbox(
+                "Origen", ["Referido", "Redes sociales", "Web", "Cartera fria", "Otro"]
+            )
+            ramo_interes = of1.text_input("Ramo de interés", placeholder="Ej: Automotor")
+            monto_estimado = of2.number_input("Monto estimado (opcional)", min_value=0.0, step=100.0)
+            notas_oportunidad = st.text_area("Notas")
+            guardar_oportunidad = st.form_submit_button("💾 Guardar lead", type="primary")
+
+            if guardar_oportunidad:
+                if not nombre_prospecto:
+                    st.error("El nombre del prospecto es obligatorio.")
+                else:
+                    db.insertar_oportunidad(
+                        nombre_prospecto=nombre_prospecto,
+                        telefono=telefono_prospecto or None,
+                        email=email_prospecto or None,
+                        origen=origen_prospecto,
+                        ramo_interes=ramo_interes or None,
+                        monto_estimado=monto_estimado or None,
+                        notas=notas_oportunidad or None,
+                    )
+                    st.success("Lead guardado.")
+                    st.rerun()
+
+    st.divider()
+
+    oportunidades = db.listar_oportunidades()
+    if not oportunidades:
+        estado_vacio("🎯", "Todavía no cargaste ningún lead u oportunidad.")
+    else:
+        etapas_visibles = ["Lead", "Contactado", "Cotizacion enviada", "Negociacion"]
+        oportunidades_activas = [o for o in oportunidades if o["etapa"] in etapas_visibles]
+        oportunidades_cerradas = [o for o in oportunidades if o["etapa"] in ("Cerrado", "Perdido")]
+
+        m1, m2, m3 = st.columns(3)
+        m1.metric("🟢 En danza", len(oportunidades_activas))
+        m2.metric("✅ Cerrados", sum(1 for o in oportunidades if o["etapa"] == "Cerrado"))
+        m3.metric("❌ Perdidos", sum(1 for o in oportunidades if o["etapa"] == "Perdido"))
+
+        st.divider()
+        st.subheader("En danza")
+
+        columnas_etapa = st.columns(len(etapas_visibles))
+        for idx, etapa in enumerate(etapas_visibles):
+            with columnas_etapa[idx]:
+                st.markdown(f"**{etapa}**")
+                for op in [o for o in oportunidades_activas if o["etapa"] == etapa]:
+                    with st.container(border=True):
+                        st.markdown(f"**{op['nombre_prospecto']}**")
+                        if op["ramo_interes"]:
+                            st.caption(f"📦 {op['ramo_interes']}")
+                        if op["monto_estimado"]:
+                            st.caption(f"💰 ${op['monto_estimado']:,.2f}")
+                        if op["telefono"]:
+                            st.caption(f"📞 {op['telefono']}")
+
+                        opciones_mover = [e for e in db.ETAPAS_PIPELINE if e != etapa]
+                        mover_a = st.selectbox(
+                            "Mover a", ["—"] + opciones_mover,
+                            key=f"mover_{op['id']}", label_visibility="collapsed",
                         )
-                        ed_cliente_tarea = etf2.selectbox(
-                            "Cliente asociado", opciones_cliente_actual,
-                            index=opciones_cliente_actual.index(cliente_actual_nombre)
-                            if cliente_actual_nombre in opciones_cliente_actual else 0,
-                        )
-                        ed_fecha_tarea = etf1.text_input(
-                            "Fecha límite (YYYY-MM-DD)", value=t["fecha_limite"] or ""
-                        )
-                        prioridades_tarea = ["Alta", "Media", "Baja"]
-                        ed_prioridad_tarea = etf2.selectbox(
-                            "Prioridad", prioridades_tarea,
-                            index=prioridades_tarea.index(t["prioridad"])
-                            if t["prioridad"] in prioridades_tarea else 1,
-                        )
-                        confirmar_editar_tarea = st.form_submit_button("💾 Guardar cambios", type="primary")
-                        if confirmar_editar_tarea:
-                            db.actualizar_tarea(
-                                tarea_id=t["id"],
-                                titulo=ed_titulo_tarea,
-                                cliente_id=opciones_cliente_tarea[ed_cliente_tarea],
-                                fecha_limite=ed_fecha_tarea or None,
-                                prioridad=ed_prioridad_tarea,
-                                estado=t["estado"],
+                        if mover_a != "—":
+                            if mover_a == "Perdido":
+                                st.session_state[f"pedir_motivo_{op['id']}"] = True
+                                st.rerun()
+                            elif mover_a == "Cerrado":
+                                nuevo_cliente_id = db.convertir_oportunidad_a_cliente(op["id"])
+                                st.success(
+                                    f"¡Convertido a cliente! Completá el CUIT/DNI real desde "
+                                    f"la ficha de '{op['nombre_prospecto']}' en Clientes."
+                                )
+                                st.rerun()
+                            else:
+                                db.actualizar_etapa_oportunidad(op["id"], mover_a)
+                                st.rerun()
+
+                        if st.session_state.get(f"pedir_motivo_{op['id']}"):
+                            motivo = st.text_input(
+                                "Motivo de la pérdida", key=f"motivo_{op['id']}"
                             )
-                            st.session_state.pop(editar_key_tarea, None)
-                            st.success("Tarea actualizada correctamente.")
+                            if st.button("Confirmar pérdida", key=f"confirmar_perdida_{op['id']}"):
+                                db.actualizar_etapa_oportunidad(op["id"], "Perdido", motivo or None)
+                                st.session_state.pop(f"pedir_motivo_{op['id']}", None)
+                                st.rerun()
+
+                        if st.button("🗑️", key=f"del_op_{op['id']}", help="Eliminar este lead"):
+                            db.eliminar_oportunidad(op["id"])
                             st.rerun()
+
+        if oportunidades_cerradas:
+            st.divider()
+            st.subheader("Historial (Cerrados / Perdidos)")
+            for op in oportunidades_cerradas:
+                icono = "✅" if op["etapa"] == "Cerrado" else "❌"
+                with st.container(border=True):
+                    st.markdown(f"{icono} **{op['nombre_prospecto']}** — {op['ramo_interes'] or '-'}")
+                    if op["etapa"] == "Perdido" and op.get("motivo_perdida"):
+                        st.caption(f"Motivo: {op['motivo_perdida']}")
