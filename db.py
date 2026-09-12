@@ -148,6 +148,13 @@ def init_db():
             fecha_carga TIMESTAMP DEFAULT NOW(),
             fecha_actualizacion TIMESTAMP DEFAULT NOW()
         );
+
+        CREATE TABLE IF NOT EXISTS notas_ramo (
+            id SERIAL PRIMARY KEY,
+            ramo TEXT NOT NULL,
+            contenido TEXT NOT NULL,
+            fecha_carga TIMESTAMP DEFAULT NOW()
+        );
         """
     )
     # Migración: agrega columnas nuevas a tablas que ya existían de versiones anteriores
@@ -190,16 +197,16 @@ def upsert_cliente(nombre, cuit_dni, telefono=None, email=None,
     if existente:
         cur.execute(
             """UPDATE clientes
-               SET nombre_razon_social = COALESCE(%s, nombre_razon_social),
-                   telefono = COALESCE(%s, telefono),
-                   email = COALESCE(%s, email),
-                   direccion = COALESCE(%s, direccion),
-                   forma_pago = COALESCE(%s, forma_pago),
-                   banco_emisor = COALESCE(%s, banco_emisor),
-                   marca_tarjeta = COALESCE(%s, marca_tarjeta),
-                   ultimos_4_digitos = COALESCE(%s, ultimos_4_digitos),
-                   vencimiento_tarjeta = COALESCE(%s, vencimiento_tarjeta),
-                   cbu_cvu = COALESCE(%s, cbu_cvu)
+               SET nombre_razon_social = COALESCE(NULLIF(%s, ''), nombre_razon_social),
+                   telefono = COALESCE(NULLIF(%s, ''), telefono),
+                   email = COALESCE(NULLIF(%s, ''), email),
+                   direccion = COALESCE(NULLIF(%s, ''), direccion),
+                   forma_pago = COALESCE(NULLIF(%s, ''), forma_pago),
+                   banco_emisor = COALESCE(NULLIF(%s, ''), banco_emisor),
+                   marca_tarjeta = COALESCE(NULLIF(%s, ''), marca_tarjeta),
+                   ultimos_4_digitos = COALESCE(NULLIF(%s, ''), ultimos_4_digitos),
+                   vencimiento_tarjeta = COALESCE(NULLIF(%s, ''), vencimiento_tarjeta),
+                   cbu_cvu = COALESCE(NULLIF(%s, ''), cbu_cvu)
                WHERE cuit_dni = %s""",
             (nombre, telefono, email, direccion, forma_pago, banco_emisor,
              marca_tarjeta, ultimos_4_digitos, vencimiento_tarjeta, cbu_cvu, cuit_dni),
@@ -223,6 +230,34 @@ def upsert_cliente(nombre, cuit_dni, telefono=None, email=None,
     cur.close()
     conn.close()
     return cliente_id
+
+
+def actualizar_datos_cliente(cliente_id, nombre, cuit_dni, telefono, email, direccion,
+                              tipo_persona, forma_pago, banco_emisor, marca_tarjeta,
+                              ultimos_4_digitos, vencimiento_tarjeta, cbu_cvu):
+    """
+    Edita directamente los datos de un cliente ya existente (a diferencia de
+    upsert_cliente, que solo actualiza campos vacíos al cargar una póliza,
+    esta función permite corregir cualquier dato en cualquier momento,
+    incluyendo el CUIT/DNI — útil para reemplazar el CUIT temporal que se
+    genera al convertir un lead del Pipeline en cliente).
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """UPDATE clientes
+           SET nombre_razon_social = %s, cuit_dni = %s, telefono = %s, email = %s,
+               direccion = %s, tipo_persona = %s, forma_pago = %s, banco_emisor = %s,
+               marca_tarjeta = %s, ultimos_4_digitos = %s, vencimiento_tarjeta = %s,
+               cbu_cvu = %s
+           WHERE id = %s""",
+        (nombre, cuit_dni, telefono or None, email or None, direccion or None,
+         tipo_persona, forma_pago or None, banco_emisor or None, marca_tarjeta or None,
+         ultimos_4_digitos or None, vencimiento_tarjeta or None, cbu_cvu or None, cliente_id),
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
 
 
 def listar_clientes(filtro: str = ""):
@@ -984,3 +1019,46 @@ def convertir_oportunidad_a_cliente(oportunidad_id):
     cur.close()
     conn.close()
     return cliente_id
+
+
+# ---------------------------------------------------------------------------
+# GUÍA DE RAMOS (notas y requisitos que indican los jefes, organizadas por IA)
+# ---------------------------------------------------------------------------
+
+def insertar_nota_ramo(ramo, contenido):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO notas_ramo (ramo, contenido) VALUES (%s, %s) RETURNING id",
+        (ramo, contenido),
+    )
+    nota_id = cur.fetchone()["id"]
+    conn.commit()
+    cur.close()
+    conn.close()
+    return nota_id
+
+
+def listar_notas_por_ramo():
+    """Devuelve un diccionario {ramo: [lista de notas]}, ordenado alfabéticamente por ramo."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM notas_ramo ORDER BY ramo, fecha_carga DESC")
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    agrupado = {}
+    for r in rows:
+        d = dict(r)
+        agrupado.setdefault(d["ramo"], []).append(d)
+    return dict(sorted(agrupado.items()))
+
+
+def eliminar_nota_ramo(nota_id):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM notas_ramo WHERE id = %s", (nota_id,))
+    conn.commit()
+    cur.close()
+    conn.close()

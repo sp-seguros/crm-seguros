@@ -16,7 +16,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 import db
-from pdf_extractor import extract_policy_data
+from pdf_extractor import extract_policy_data, organizar_notas_por_ramo
 
 load_dotenv()
 
@@ -150,7 +150,7 @@ _siniestros_abiertos_count = db.contar_siniestros_abiertos()
 _tareas_pendientes_count = db.contar_tareas_hoy_y_vencidas()
 _opciones_nav = [
     "📊 Dashboard", "🎯 Pipeline", "📥 Cargar Póliza", "👥 Clientes", "💰 Cobranzas",
-    "🚨 Siniestros", "🗓️ Tareas",
+    "🚨 Siniestros", "🗓️ Tareas", "📚 Guía de Ramos",
 ]
 
 
@@ -335,6 +335,18 @@ elif pagina == "📥 Cargar Póliza":
     if "extraccion" in st.session_state:
         datos = st.session_state["extraccion"]
 
+        ramo_detectado = (datos.get("ramo") or "").strip()
+        if ramo_detectado:
+            notas_ramo_actual = db.listar_notas_por_ramo()
+            coincidencias = [
+                notas for ramo_guardado, notas in notas_ramo_actual.items()
+                if ramo_detectado.upper() in ramo_guardado.upper() or ramo_guardado.upper() in ramo_detectado.upper()
+            ]
+            if coincidencias:
+                with st.expander(f"📚 Recordatorio para el ramo '{ramo_detectado}' (según tu Guía de Ramos)", expanded=True):
+                    for nota in coincidencias[0]:
+                        st.markdown(f"• {nota['contenido']}")
+
         with st.form("form_confirmacion"):
             st.subheader("Datos del Cliente")
             c1, c2 = st.columns(2)
@@ -463,7 +475,74 @@ elif pagina == "👥 Clientes":
             )
 
             with st.expander(titulo_ficha):
-                st.caption(f"📞 {cliente['telefono'] or '-'} · ✉️ {cliente['email'] or '-'}")
+                cab1, cab2 = st.columns([4, 1])
+                cab1.caption(f"📞 {cliente['telefono'] or '-'} · ✉️ {cliente['email'] or '-'}")
+
+                editar_cliente_key = f"mostrar_editar_cliente_{cliente['id']}"
+                if cab2.button("✏️ Editar Cliente", key=f"btn_editar_cliente_{cliente['id']}"):
+                    st.session_state[editar_cliente_key] = not st.session_state.get(editar_cliente_key, False)
+                    st.rerun()
+
+                if st.session_state.get(editar_cliente_key):
+                    with st.form(f"form_editar_cliente_{cliente['id']}"):
+                        st.caption(
+                            "Corregí cualquier dato del cliente, incluido el CUIT/DNI "
+                            "(útil para reemplazar el CUIT temporal de un lead convertido desde Pipeline)."
+                        )
+                        ecl1, ecl2 = st.columns(2)
+                        ec_nombre = ecl1.text_input("Nombre / Razón Social", value=cliente["nombre_razon_social"] or "")
+                        ec_cuit = ecl2.text_input("CUIT / DNI", value=cliente["cuit_dni"] or "")
+                        ec_telefono = ecl1.text_input("Teléfono", value=cliente["telefono"] or "")
+                        ec_email = ecl2.text_input("Email", value=cliente["email"] or "")
+                        ec_direccion = ecl1.text_input("Dirección", value=cliente.get("direccion") or "")
+                        tipos_persona = ["Fisica", "Juridica"]
+                        ec_tipo = ecl2.selectbox(
+                            "Tipo de persona", tipos_persona,
+                            index=tipos_persona.index(cliente.get("tipo_persona"))
+                            if cliente.get("tipo_persona") in tipos_persona else 0,
+                        )
+
+                        st.markdown("**Medio de pago**")
+                        ecl3, ecl4 = st.columns(2)
+                        opciones_pago_edit = ["", "Debito Automatico", "CBU", "Tarjeta de Credito", "Cuponera", "Mercado Pago"]
+                        forma_pago_actual = cliente.get("forma_pago") or ""
+                        ec_forma_pago = ecl3.selectbox(
+                            "Forma de pago", opciones_pago_edit,
+                            index=opciones_pago_edit.index(forma_pago_actual) if forma_pago_actual in opciones_pago_edit else 0,
+                        )
+                        ec_banco = ecl4.text_input("Banco", value=cliente.get("banco_emisor") or "")
+                        ec_marca = ecl3.selectbox(
+                            "Marca de tarjeta", ["", "Visa", "Mastercard", "Amex", "Otra"],
+                            index=["", "Visa", "Mastercard", "Amex", "Otra"].index(cliente.get("marca_tarjeta") or "")
+                            if (cliente.get("marca_tarjeta") or "") in ["", "Visa", "Mastercard", "Amex", "Otra"] else 0,
+                        )
+                        ec_ult4 = ecl4.text_input("Últimos 4 dígitos", value=cliente.get("ultimos_4_digitos") or "", max_chars=4)
+                        ec_venc_tarjeta = ecl3.text_input("Vto. tarjeta MM/AA", value=cliente.get("vencimiento_tarjeta") or "")
+                        ec_cbu = ecl4.text_input("CBU / CVU", value=cliente.get("cbu_cvu") or "")
+
+                        confirmar_editar_cliente = st.form_submit_button("💾 Guardar cambios", type="primary")
+                        if confirmar_editar_cliente:
+                            if not ec_nombre or not ec_cuit:
+                                st.error("Nombre y CUIT/DNI son obligatorios.")
+                            else:
+                                db.actualizar_datos_cliente(
+                                    cliente_id=cliente["id"],
+                                    nombre=ec_nombre,
+                                    cuit_dni=ec_cuit,
+                                    telefono=ec_telefono,
+                                    email=ec_email,
+                                    direccion=ec_direccion,
+                                    tipo_persona=ec_tipo,
+                                    forma_pago=ec_forma_pago,
+                                    banco_emisor=ec_banco,
+                                    marca_tarjeta=ec_marca,
+                                    ultimos_4_digitos=ec_ult4,
+                                    vencimiento_tarjeta=ec_venc_tarjeta,
+                                    cbu_cvu=ec_cbu,
+                                )
+                                st.session_state.pop(editar_cliente_key, None)
+                                st.success("Cliente actualizado correctamente.")
+                                st.rerun()
 
                 forma_pago = cliente.get("forma_pago")
                 if forma_pago:
@@ -1147,3 +1226,60 @@ elif pagina == "🎯 Pipeline":
                     st.markdown(f"{icono} **{op['nombre_prospecto']}** — {op['ramo_interes'] or '-'}")
                     if op["etapa"] == "Perdido" and op.get("motivo_perdida"):
                         st.caption(f"Motivo: {op['motivo_perdida']}")
+
+# ---------------------------------------------------------------------------
+# GUÍA DE RAMOS
+# ---------------------------------------------------------------------------
+elif pagina == "📚 Guía de Ramos":
+    st.title("📚 Guía de Ramos")
+    st.caption(
+        "Volcá acá lo que te van diciendo tus jefes sobre qué pedirle a los "
+        "clientes según el ramo (podés escribir todo junto, mezclando varios "
+        "ramos: la IA lo separa y organiza solo)."
+    )
+
+    with st.form("form_nota_ramo"):
+        texto_nota = st.text_area(
+            "Notas nuevas",
+            placeholder=(
+                "Ej: Para auto pedir cédula verde y último recibo de patente. "
+                "Para vida obligatorio, si es empleada doméstica pedir tarjeta de crédito..."
+            ),
+            height=140,
+        )
+        organizar = st.form_submit_button("✨ Organizar con IA y guardar", type="primary")
+
+        if organizar:
+            if not texto_nota.strip():
+                st.error("Escribí algo primero.")
+            else:
+                with st.spinner("Organizando por ramo..."):
+                    try:
+                        items = organizar_notas_por_ramo(texto_nota)
+                        if not items:
+                            st.warning("La IA no pudo identificar items en el texto. Probá reformularlo.")
+                        else:
+                            for item in items:
+                                db.insertar_nota_ramo(
+                                    ramo=item.get("ramo", "Otro"),
+                                    contenido=item.get("contenido", ""),
+                                )
+                            st.success(f"Se guardaron {len(items)} nota(s), organizadas por ramo.")
+                            st.rerun()
+                    except Exception as e:
+                        st.error(f"No se pudo organizar el texto: {e}")
+
+    st.divider()
+
+    notas_por_ramo = db.listar_notas_por_ramo()
+    if not notas_por_ramo:
+        estado_vacio("📚", "Todavía no cargaste ninguna nota. Empezá escribiendo arriba.")
+    else:
+        for ramo, notas in notas_por_ramo.items():
+            with st.expander(f"📦 {ramo} ({len(notas)})", expanded=False):
+                for nota in notas:
+                    nc1, nc2 = st.columns([6, 1])
+                    nc1.markdown(f"• {nota['contenido']}")
+                    if nc2.button("🗑️", key=f"del_nota_{nota['id']}", help="Eliminar esta nota"):
+                        db.eliminar_nota_ramo(nota["id"])
+                        st.rerun()

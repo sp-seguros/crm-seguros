@@ -53,7 +53,7 @@ Si un dato no aparece en el documento o no estás seguro, devolvé null para ese
 No inventes datos."""
 
 
-def _get_model():
+def _get_model(system_instruction):
     api_key = os.environ.get("GOOGLE_API_KEY")
     if not api_key:
         raise RuntimeError(
@@ -64,7 +64,7 @@ def _get_model():
     genai.configure(api_key=api_key)
     return genai.GenerativeModel(
         model_name=MODEL,
-        system_instruction=SYSTEM_PROMPT,
+        system_instruction=system_instruction,
         generation_config=genai.GenerationConfig(
             response_mime_type="application/json",
             temperature=0,
@@ -78,7 +78,7 @@ def extract_policy_data(pdf_bytes: bytes) -> dict:
     los campos extraídos. Lanza excepción si la API falla o si la
     respuesta no es JSON válido.
     """
-    model = _get_model()
+    model = _get_model(SYSTEM_PROMPT)
 
     response = model.generate_content(
         [
@@ -99,3 +99,58 @@ def extract_policy_data(pdf_bytes: bytes) -> dict:
         ) from e
 
     return data
+
+
+SYSTEM_PROMPT_NOTAS_RAMO = """Sos un asistente que ayuda a una productora de
+seguros argentina a organizar apuntes sueltos que le van dictando sus jefes
+sobre qué pedirle a los clientes según el ramo de la póliza (ej: "para auto
+pedir cédula verde", "para vida obligatorio de empleada doméstica pedir
+tarjeta de crédito", etc.).
+
+Vas a recibir un texto libre, que puede mezclar indicaciones de varios ramos
+distintos en el mismo párrafo, o ser sobre un solo ramo. Tu tarea es separarlo
+en items individuales, cada uno asociado a UN ramo, y devolver EXCLUSIVAMENTE
+un JSON válido con este formato, sin texto adicional ni markdown:
+
+{
+  "items": [
+    {"ramo": "Automotor", "contenido": "Pedir cédula verde y último recibo de patente."},
+    {"ramo": "Vida Obligatorio", "contenido": "Si es empleada doméstica, pedir tarjeta de crédito para el pago."}
+  ]
+}
+
+Reglas:
+- Usá nombres de ramo consistentes y en Argentina (Automotor, Hogar, Vida,
+  Vida Obligatorio, ART, Comercio, Responsabilidad Civil, Caución, Otro).
+- Si el texto ya viene claramente separado por ramo, respetá esa separación.
+- Si menciona una condición particular (ej. "si es empleada doméstica"),
+  incluila dentro del texto de "contenido", no la inventes ni la ignores.
+- No resumas de más: conservá el detalle práctico tal como lo escribió la
+  productora, solo reorganizado y prolijo.
+- Si no podés determinar el ramo de una parte del texto, usá "Otro"."""
+
+
+def organizar_notas_por_ramo(texto: str) -> list:
+    """
+    Recibe un texto libre (posiblemente con notas de varios ramos mezcladas)
+    y devuelve una lista de {"ramo": ..., "contenido": ...} ya separados y
+    prolijos, usando la IA para clasificar por ramo.
+    """
+    model = _get_model(SYSTEM_PROMPT_NOTAS_RAMO)
+
+    response = model.generate_content(
+        f"Organizá estas notas por ramo:\n\n{texto}",
+        request_options={"timeout": 60},
+    )
+
+    raw_text = (response.text or "").strip()
+    cleaned = raw_text.replace("```json", "").replace("```", "").strip()
+
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"La IA no devolvió un JSON válido. Respuesta cruda:\n{raw_text}"
+        ) from e
+
+    return data.get("items", [])
