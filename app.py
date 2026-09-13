@@ -5,9 +5,11 @@ Ejecutar con: streamlit run app.py
 """
 
 import os
+import re
 from pathlib import Path
 import io
 import urllib.parse
+import zipfile
 from datetime import date, datetime, timedelta
 
 import pandas as pd
@@ -16,7 +18,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 import db
-from pdf_extractor import extract_policy_data, organizar_notas_por_ramo
+from pdf_extractor import extract_policy_data, organizar_notas_por_ramo, organizar_notas_desde_chat
 
 load_dotenv()
 
@@ -91,6 +93,17 @@ st.markdown(
 
 UPLOADS_DIR = Path(__file__).parent / "uploads"
 UPLOADS_DIR.mkdir(exist_ok=True)
+
+
+def nombre_archivo_seguro(texto: str) -> str:
+    """
+    Limpia un texto (CUIT, número de póliza, etc.) para usarlo como parte
+    de un nombre de archivo, sacando barras y otros caracteres que romperían
+    la ruta (ej: un N° de póliza con formato "123/2024").
+    """
+    texto = str(texto or "sinnro")
+    return re.sub(r"[^A-Za-z0-9_-]+", "-", texto).strip("-") or "sinnro"
+
 
 COLOR_PASTEL = {
     "verde": ("#DCFCE7", "#15803D"),
@@ -412,7 +425,7 @@ elif pagina == "📥 Cargar Póliza":
                 if not cuit_dni or not nombre:
                     st.error("Nombre y CUIT/DNI son obligatorios.")
                 else:
-                    pdf_path = UPLOADS_DIR / f"{cuit_dni}_{numero_poliza or 'sinnro'}.pdf"
+                    pdf_path = UPLOADS_DIR / f"{nombre_archivo_seguro(cuit_dni)}_{nombre_archivo_seguro(numero_poliza)}.pdf"
                     pdf_path.write_bytes(st.session_state["pdf_bytes"])
 
                     cliente_id = db.upsert_cliente(
@@ -425,28 +438,106 @@ elif pagina == "📥 Cargar Póliza":
                         vencimiento_tarjeta=vencimiento_tarjeta or None,
                         cbu_cvu=cbu_cvu or None,
                     )
-                    db.insertar_poliza(
-                        cliente_id=cliente_id,
-                        compania=compania,
-                        numero_poliza=numero_poliza,
-                        ramo=ramo,
-                        riesgo_patente=riesgo_patente,
-                        vigencia_desde=vigencia_desde,
-                        vigencia_hasta=vigencia_hasta,
-                        importe_total=importe_total,
-                        cantidad_cuotas=int(cantidad_cuotas),
-                        pdf_path=str(pdf_path),
-                    )
-                    st.success(f"✅ Póliza guardada y vinculada a {nombre}.")
-                    for k in ("extraccion", "archivo_actual", "pdf_bytes"):
-                        st.session_state.pop(k, None)
+
+                    datos_poliza_pendiente = {
+                        "cliente_id": cliente_id, "nombre": nombre, "compania": compania,
+                        "numero_poliza": numero_poliza, "ramo": ramo, "riesgo_patente": riesgo_patente,
+                        "vigencia_desde": vigencia_desde, "vigencia_hasta": vigencia_hasta,
+                        "importe_total": importe_total, "cantidad_cuotas": int(cantidad_cuotas),
+                        "pdf_path": str(pdf_path),
+                    }
+
+                    similar = db.buscar_poliza_activa_similar(cliente_id, riesgo_patente, numero_poliza)
+                    if similar and similar["vigencia_hasta"] != vigencia_hasta:
+                        datos_poliza_pendiente["poliza_similar_id"] = similar["id"]
+                        datos_poliza_pendiente["poliza_similar_info"] = (
+                            f"{similar['compania_aseguradora'] or '-'} — Póliza {similar['numero_poliza'] or '-'} "
+                            f"(vence {similar['vigencia_hasta'] or '-'})"
+                        )
+                        st.session_state["pendiente_poliza"] = datos_poliza_pendiente
+                    else:
+                        db.insertar_poliza(
+                            cliente_id=cliente_id, compania=compania, numero_poliza=numero_poliza,
+                            ramo=ramo, riesgo_patente=riesgo_patente, vigencia_desde=vigencia_desde,
+                            vigencia_hasta=vigencia_hasta, importe_total=importe_total,
+                            cantidad_cuotas=int(cantidad_cuotas), pdf_path=str(pdf_path),
+                        )
+                        st.success(f"✅ Póliza guardada y vinculada a {nombre}.")
+                        for k in ("extraccion", "archivo_actual", "pdf_bytes"):
+                            st.session_state.pop(k, None)
                     st.rerun()
+
+    if st.session_state.get("pendiente_poliza"):
+        pend = st.session_state["pendiente_poliza"]
+        st.warning(
+            f"⚠️ **{pend['nombre']}** ya tiene una póliza **activa** con el mismo riesgo/patente "
+            f"o número de póliza: {pend['poliza_similar_info']}. ¿La nueva que estás cargando es "
+            "la renovación de esa misma cobertura, o es una póliza distinta?"
+        )
+        pc1, pc2 = st.columns(2)
+        if pc1.button("🔄 Sí, es una renovación", type="primary"):
+            db.actualizar_estado_poliza(pend["poliza_similar_id"], "Renovada")
+            db.insertar_poliza(
+                cliente_id=pend["cliente_id"], compania=pend["compania"],
+                numero_poliza=pend["numero_poliza"], ramo=pend["ramo"],
+                riesgo_patente=pend["riesgo_patente"], vigencia_desde=pend["vigencia_desde"],
+                vigencia_hasta=pend["vigencia_hasta"], importe_total=pend["importe_total"],
+                cantidad_cuotas=pend["cantidad_cuotas"], pdf_path=pend["pdf_path"],
+            )
+            st.session_state.pop("pendiente_poliza", None)
+            for k in ("extraccion", "archivo_actual", "pdf_bytes"):
+                st.session_state.pop(k, None)
+            st.success("✅ Póliza anterior marcada como 'Renovada' y la nueva quedó cargada como activa.")
+            st.rerun()
+        if pc2.button("➕ No, es una póliza distinta"):
+            db.insertar_poliza(
+                cliente_id=pend["cliente_id"], compania=pend["compania"],
+                numero_poliza=pend["numero_poliza"], ramo=pend["ramo"],
+                riesgo_patente=pend["riesgo_patente"], vigencia_desde=pend["vigencia_desde"],
+                vigencia_hasta=pend["vigencia_hasta"], importe_total=pend["importe_total"],
+                cantidad_cuotas=pend["cantidad_cuotas"], pdf_path=pend["pdf_path"],
+            )
+            st.session_state.pop("pendiente_poliza", None)
+            for k in ("extraccion", "archivo_actual", "pdf_bytes"):
+                st.session_state.pop(k, None)
+            st.success(f"✅ Póliza guardada como una cobertura distinta de {pend['nombre']}.")
+            st.rerun()
 
 # ---------------------------------------------------------------------------
 # CLIENTES
 # ---------------------------------------------------------------------------
 elif pagina == "👥 Clientes":
     st.title("👥 Clientes")
+
+    with st.expander("➕ Agregar cliente nuevo (sin póliza)"):
+        with st.form("form_nuevo_cliente_directo"):
+            nc1, nc2 = st.columns(2)
+            nuevo_nombre = nc1.text_input("Nombre / Razón Social")
+            nuevo_cuit = nc2.text_input("CUIT / DNI")
+            nuevo_telefono = nc1.text_input("Teléfono")
+            nuevo_email = nc2.text_input("Email")
+            nuevo_direccion = nc1.text_input("Dirección")
+            nuevo_tipo = nc2.selectbox("Tipo de persona", ["Fisica", "Juridica"])
+
+            st.markdown("**Medio de pago (opcional)**")
+            ncp1, ncp2 = st.columns(2)
+            opciones_pago_nuevo = ["", "Debito Automatico", "CBU", "Tarjeta de Credito", "Cuponera", "Mercado Pago"]
+            nuevo_forma_pago = ncp1.selectbox("Forma de pago", opciones_pago_nuevo)
+            nuevo_banco = ncp2.text_input("Banco")
+
+            guardar_cliente_directo = st.form_submit_button("💾 Guardar cliente", type="primary")
+            if guardar_cliente_directo:
+                if not nuevo_nombre or not nuevo_cuit:
+                    st.error("Nombre y CUIT/DNI son obligatorios.")
+                else:
+                    db.upsert_cliente(
+                        nombre=nuevo_nombre, cuit_dni=nuevo_cuit, telefono=nuevo_telefono,
+                        email=nuevo_email, direccion=nuevo_direccion, tipo_persona=nuevo_tipo,
+                        forma_pago=nuevo_forma_pago or None, banco_emisor=nuevo_banco or None,
+                    )
+                    st.success(f"Cliente '{nuevo_nombre}' guardado. Después le podés cargar pólizas cuando quieras.")
+                    st.rerun()
+
     busqueda = st.text_input("Buscar por nombre o CUIT/DNI")
     clientes = db.listar_clientes(busqueda)
 
@@ -1255,7 +1346,7 @@ elif pagina == "📚 Guía de Ramos":
             else:
                 with st.spinner("Organizando por ramo..."):
                     try:
-                        items = organizar_notas_por_ramo(texto_nota)
+                        items = organizar_notas_por_ramo(texto_nota, db.listar_todas_las_notas_ramo())
                         if not items:
                             st.warning("La IA no pudo identificar items en el texto. Probá reformularlo.")
                         else:
@@ -1268,6 +1359,59 @@ elif pagina == "📚 Guía de Ramos":
                             st.rerun()
                     except Exception as e:
                         st.error(f"No se pudo organizar el texto: {e}")
+
+    with st.expander("📎 O subir un chat de WhatsApp exportado (.zip o .txt)"):
+        st.caption(
+            "Exportá el chat desde WhatsApp (Chat > Más opciones > Exportar chat > "
+            "'Sin archivos multimedia') y subí acá el .zip o el .txt que te descarga. "
+            "La IA va a leer todo el chat y quedarse solo con lo que tenga que ver con "
+            "seguros, ignorando el resto de la conversación."
+        )
+        archivo_chat = st.file_uploader("Chat exportado", type=["zip", "txt"], key="uploader_chat_wa")
+
+        if archivo_chat is not None:
+            if st.button("✨ Analizar chat y guardar lo relevante", type="primary"):
+                with st.spinner("Leyendo el chat y filtrando lo relacionado a seguros..."):
+                    try:
+                        if archivo_chat.name.lower().endswith(".zip"):
+                            with zipfile.ZipFile(io.BytesIO(archivo_chat.getvalue())) as zf:
+                                nombre_txt = next(
+                                    (n for n in zf.namelist() if n.lower().endswith(".txt")), None
+                                )
+                                if not nombre_txt:
+                                    st.error("El .zip no tiene ningún archivo .txt adentro.")
+                                    texto_chat = None
+                                else:
+                                    texto_chat = zf.read(nombre_txt).decode("utf-8", errors="ignore")
+                        else:
+                            texto_chat = archivo_chat.getvalue().decode("utf-8", errors="ignore")
+
+                        if texto_chat:
+                            items, truncado = organizar_notas_desde_chat(
+                                texto_chat, db.listar_todas_las_notas_ramo()
+                            )
+                            if truncado:
+                                st.warning(
+                                    "El chat era muy largo, así que se analizó solo la parte más "
+                                    "reciente. Si falta algo importante de hace tiempo, subí un "
+                                    "export más acotado de esa época."
+                                )
+                            if not items:
+                                st.warning(
+                                    "No se encontró nada relacionado a seguros en ese chat."
+                                )
+                            else:
+                                for item in items:
+                                    db.insertar_nota_ramo(
+                                        ramo=item.get("ramo", "Otro"),
+                                        contenido=item.get("contenido", ""),
+                                    )
+                                st.success(
+                                    f"Se guardaron {len(items)} nota(s) relevantes, organizadas por ramo."
+                                )
+                                st.rerun()
+                    except Exception as e:
+                        st.error(f"No se pudo procesar el chat: {e}")
 
     st.divider()
 

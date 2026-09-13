@@ -1055,6 +1055,18 @@ def listar_notas_por_ramo():
     return dict(sorted(agrupado.items()))
 
 
+def listar_todas_las_notas_ramo():
+    """Devuelve todas las notas en una lista plana [{'ramo':..., 'contenido':...}, ...],
+    útil para pasarle a la IA como contexto y evitar que duplique información."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT ramo, contenido FROM notas_ramo ORDER BY ramo")
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 def eliminar_nota_ramo(nota_id):
     conn = get_connection()
     cur = conn.cursor()
@@ -1062,3 +1074,38 @@ def eliminar_nota_ramo(nota_id):
     conn.commit()
     cur.close()
     conn.close()
+
+
+def buscar_poliza_activa_similar(cliente_id, riesgo_patente, numero_poliza):
+    """
+    Busca si el cliente ya tiene una póliza ACTIVA con el mismo riesgo/patente
+    o el mismo número de póliza, para detectar que una carga nueva es en
+    realidad la renovación de esa misma cobertura (mismo vehículo, por
+    ejemplo) y así evitar duplicarla como si fuera una póliza distinta.
+    """
+    riesgo_patente = (riesgo_patente or "").strip()
+    numero_poliza = (numero_poliza or "").strip()
+    if not riesgo_patente and not numero_poliza:
+        return None
+
+    conn = get_connection()
+    cur = conn.cursor()
+    condiciones = []
+    parametros = [cliente_id]
+    if riesgo_patente:
+        condiciones.append("TRIM(UPPER(COALESCE(riesgo_patente, ''))) = UPPER(%s)")
+        parametros.append(riesgo_patente)
+    if numero_poliza:
+        condiciones.append("TRIM(COALESCE(numero_poliza, '')) = %s")
+        parametros.append(numero_poliza)
+
+    cur.execute(
+        f"""SELECT * FROM polizas
+            WHERE cliente_id = %s AND estado = 'Activa' AND ({' OR '.join(condiciones)})
+            ORDER BY vigencia_hasta DESC LIMIT 1""",
+        tuple(parametros),
+    )
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return dict(row) if row else None

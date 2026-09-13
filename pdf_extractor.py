@@ -127,19 +127,36 @@ Reglas:
   incluila dentro del texto de "contenido", no la inventes ni la ignores.
 - No resumas de más: conservá el detalle práctico tal como lo escribió la
   productora, solo reorganizado y prolijo.
-- Si no podés determinar el ramo de una parte del texto, usá "Otro"."""
+- Si no podés determinar el ramo de una parte del texto, usá "Otro".
+- Vas a recibir también una lista de notas QUE YA ESTÁN GUARDADAS. Si algo
+  del texto nuevo ya está cubierto por una nota existente (aunque esté
+  redactado distinto, con otras palabras), NO la vuelvas a incluir en tu
+  respuesta. Devolvé únicamente los items genuinamente nuevos, que agregan
+  información que todavía no estaba anotada."""
 
 
-def organizar_notas_por_ramo(texto: str) -> list:
+def _formatear_notas_existentes(notas_existentes) -> str:
+    if not notas_existentes:
+        return "(Todavía no hay ninguna nota guardada.)"
+    return "\n".join(f"- [{n['ramo']}] {n['contenido']}" for n in notas_existentes)
+
+
+def organizar_notas_por_ramo(texto: str, notas_existentes=None) -> list:
     """
     Recibe un texto libre (posiblemente con notas de varios ramos mezcladas)
     y devuelve una lista de {"ramo": ..., "contenido": ...} ya separados y
-    prolijos, usando la IA para clasificar por ramo.
+    prolijos, usando la IA para clasificar por ramo. Si se pasan
+    'notas_existentes' (lista de dicts con 'ramo' y 'contenido'), la IA
+    descarta cualquier cosa que ya esté cubierta por esas notas.
     """
     model = _get_model(SYSTEM_PROMPT_NOTAS_RAMO)
 
+    prompt = (
+        f"Notas que ya están guardadas:\n{_formatear_notas_existentes(notas_existentes)}\n\n"
+        f"Texto nuevo a organizar:\n{texto}"
+    )
     response = model.generate_content(
-        f"Organizá estas notas por ramo:\n\n{texto}",
+        prompt,
         request_options={"timeout": 60},
     )
 
@@ -154,3 +171,84 @@ def organizar_notas_por_ramo(texto: str) -> list:
         ) from e
 
     return data.get("items", [])
+
+
+SYSTEM_PROMPT_CHAT_WHATSAPP = """Sos un asistente que ayuda a una productora
+de seguros argentina a rescatar información útil de una conversación de
+WhatsApp exportada (con jefes, compañeros o supervisores), que mezcla charla
+cotidiana con instrucciones de trabajo reales.
+
+Vas a recibir el texto crudo de un chat exportado de WhatsApp (con formato
+típico "DD/MM/AA, HH:MM - Nombre: mensaje", puede incluir líneas como
+"<Multimedia omitido>" que debés ignorar).
+
+Tu tarea es leer TODO el chat y quedarte EXCLUSIVAMENTE con los mensajes que
+sean indicaciones de trabajo relacionadas a pólizas de seguro: qué pedirle a
+un cliente según el ramo, requisitos de documentación, condiciones
+particulares (ej. "si es empleada doméstica pedir tarjeta de crédito"),
+procedimientos internos, etc. IGNORÁ por completo saludos, charla personal,
+chistes, coordinación de horarios, o cualquier cosa que no sea una
+indicación de trabajo concreta sobre seguros.
+
+Devolvé EXCLUSIVAMENTE un JSON válido, sin texto adicional ni markdown, con
+este formato:
+
+{
+  "items": [
+    {"ramo": "Automotor", "contenido": "Pedir cédula verde y último recibo de patente."},
+    {"ramo": "Vida Obligatorio", "contenido": "Si es empleada doméstica, pedir tarjeta de crédito para el pago."}
+  ]
+}
+
+Reglas:
+- Usá nombres de ramo consistentes (Automotor, Hogar, Vida, Vida Obligatorio,
+  ART, Comercio, Responsabilidad Civil, Caución, Otro).
+- Si un mismo tema se repite en varios mensajes del chat, unificalo en un
+  solo item (no dupliques).
+- Si el chat no tiene ninguna indicación relevante de seguros, devolvé
+  "items": [] (una lista vacía), no inventes nada.
+- Vas a recibir también una lista de notas QUE YA ESTÁN GUARDADAS de cargas
+  anteriores. Si algo del chat ya está cubierto por una nota existente
+  (aunque esté escrito distinto), NO la vuelvas a incluir. Devolvé
+  únicamente información genuinamente nueva."""
+
+
+def organizar_notas_desde_chat(texto_chat: str, notas_existentes=None) -> list:
+    """
+    Recibe el texto crudo de un chat de WhatsApp exportado y devuelve solo
+    los items relevantes a seguros, organizados por ramo, ignorando charla
+    que no tenga que ver con el trabajo. Si se pasan 'notas_existentes'
+    (lista de dicts con 'ramo' y 'contenido'), descarta lo que ya esté
+    cubierto por esas notas.
+    """
+    # Límite prudente de tamaño para no exceder tiempos de respuesta ni
+    # cuota gratuita: si el chat es muy largo, se recorta a los últimos
+    # ~150.000 caracteres (los mensajes más recientes).
+    limite_caracteres = 150_000
+    truncado = len(texto_chat) > limite_caracteres
+    if truncado:
+        texto_chat = texto_chat[-limite_caracteres:]
+
+    model = _get_model(SYSTEM_PROMPT_CHAT_WHATSAPP)
+
+    prompt = (
+        f"Notas que ya están guardadas:\n{_formatear_notas_existentes(notas_existentes)}\n\n"
+        f"Este es el chat exportado:\n\n{texto_chat}"
+    )
+    response = model.generate_content(
+        prompt,
+        request_options={"timeout": 90},
+    )
+
+    raw_text = (response.text or "").strip()
+    cleaned = raw_text.replace("```json", "").replace("```", "").strip()
+
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"La IA no devolvió un JSON válido. Respuesta cruda:\n{raw_text}"
+        ) from e
+
+    items = data.get("items", [])
+    return items, truncado
