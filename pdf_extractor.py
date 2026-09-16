@@ -213,42 +213,56 @@ Reglas:
   únicamente información genuinamente nueva."""
 
 
-def organizar_notas_desde_chat(texto_chat: str, notas_existentes=None) -> list:
+def organizar_notas_desde_chat(texto_chat: str, notas_existentes=None):
     """
     Recibe el texto crudo de un chat de WhatsApp exportado y devuelve solo
     los items relevantes a seguros, organizados por ramo, ignorando charla
-    que no tenga que ver con el trabajo. Si se pasan 'notas_existentes'
-    (lista de dicts con 'ramo' y 'contenido'), descarta lo que ya esté
-    cubierto por esas notas.
+    que no tenga que ver con el trabajo.
+
+    Procesa el chat COMPLETO sin importar cuán largo sea: si supera un
+    tamaño manejable por llamada, lo divide en tramos y hace varias
+    llamadas seguidas a la IA. Cada tramo "ve" lo que ya se encontró en los
+    tramos anteriores (y lo que ya estaba guardado de antes), para no
+    duplicar información entre tramos.
+
+    Devuelve (items_nuevos, cantidad_de_tramos_procesados).
     """
-    # Límite prudente de tamaño para no exceder tiempos de respuesta ni
-    # cuota gratuita: si el chat es muy largo, se recorta a los últimos
-    # ~150.000 caracteres (los mensajes más recientes).
-    limite_caracteres = 150_000
-    truncado = len(texto_chat) > limite_caracteres
-    if truncado:
-        texto_chat = texto_chat[-limite_caracteres:]
+    TAMANIO_TRAMO = 80_000
+    MAX_TRAMOS = 20  # ~1.600.000 caracteres en total como techo razonable
+
+    tramos = [
+        texto_chat[i:i + TAMANIO_TRAMO]
+        for i in range(0, len(texto_chat), TAMANIO_TRAMO)
+    ] or [""]
+
+    if len(tramos) > MAX_TRAMOS:
+        tramos = tramos[-MAX_TRAMOS:]  # se queda con la parte más reciente
 
     model = _get_model(SYSTEM_PROMPT_CHAT_WHATSAPP)
+    notas_acumuladas = list(notas_existentes or [])
+    items_nuevos_totales = []
 
-    prompt = (
-        f"Notas que ya están guardadas:\n{_formatear_notas_existentes(notas_existentes)}\n\n"
-        f"Este es el chat exportado:\n\n{texto_chat}"
-    )
-    response = model.generate_content(
-        prompt,
-        request_options={"timeout": 90},
-    )
+    for idx, tramo in enumerate(tramos):
+        prompt = (
+            f"Notas que ya están guardadas o ya encontradas en tramos anteriores "
+            f"de este mismo chat:\n{_formatear_notas_existentes(notas_acumuladas)}\n\n"
+            f"Este es el tramo {idx + 1} de {len(tramos)} del chat exportado:\n\n{tramo}"
+        )
+        response = model.generate_content(prompt, request_options={"timeout": 90})
 
-    raw_text = (response.text or "").strip()
-    cleaned = raw_text.replace("```json", "").replace("```", "").strip()
+        raw_text = (response.text or "").strip()
+        cleaned = raw_text.replace("```json", "").replace("```", "").strip()
 
-    try:
-        data = json.loads(cleaned)
-    except json.JSONDecodeError as e:
-        raise ValueError(
-            f"La IA no devolvió un JSON válido. Respuesta cruda:\n{raw_text}"
-        ) from e
+        try:
+            data = json.loads(cleaned)
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                f"La IA no devolvió un JSON válido en el tramo {idx + 1} de {len(tramos)}. "
+                f"Respuesta cruda:\n{raw_text}"
+            ) from e
 
-    items = data.get("items", [])
-    return items, truncado
+        nuevos = data.get("items", [])
+        items_nuevos_totales.extend(nuevos)
+        notas_acumuladas.extend(nuevos)
+
+    return items_nuevos_totales, len(tramos)

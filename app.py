@@ -1371,7 +1371,10 @@ elif pagina == "📚 Guía de Ramos":
 
         if archivo_chat is not None:
             if st.button("✨ Analizar chat y guardar lo relevante", type="primary"):
-                with st.spinner("Leyendo el chat y filtrando lo relacionado a seguros..."):
+                with st.spinner(
+                    "Leyendo el chat y filtrando lo relacionado a seguros... "
+                    "si es muy largo puede tardar varios minutos, porque se procesa en tramos."
+                ):
                     try:
                         if archivo_chat.name.lower().endswith(".zip"):
                             with zipfile.ZipFile(io.BytesIO(archivo_chat.getvalue())) as zf:
@@ -1387,18 +1390,14 @@ elif pagina == "📚 Guía de Ramos":
                             texto_chat = archivo_chat.getvalue().decode("utf-8", errors="ignore")
 
                         if texto_chat:
-                            items, truncado = organizar_notas_desde_chat(
+                            items, cantidad_tramos = organizar_notas_desde_chat(
                                 texto_chat, db.listar_todas_las_notas_ramo()
                             )
-                            if truncado:
-                                st.warning(
-                                    "El chat era muy largo, así que se analizó solo la parte más "
-                                    "reciente. Si falta algo importante de hace tiempo, subí un "
-                                    "export más acotado de esa época."
-                                )
+                            if cantidad_tramos > 1:
+                                st.caption(f"El chat se procesó en {cantidad_tramos} tramos.")
                             if not items:
                                 st.warning(
-                                    "No se encontró nada relacionado a seguros en ese chat."
+                                    "No se encontró nada nuevo relacionado a seguros en ese chat."
                                 )
                             else:
                                 for item in items:
@@ -1407,7 +1406,7 @@ elif pagina == "📚 Guía de Ramos":
                                         contenido=item.get("contenido", ""),
                                     )
                                 st.success(
-                                    f"Se guardaron {len(items)} nota(s) relevantes, organizadas por ramo."
+                                    f"Se guardaron {len(items)} nota(s) nuevas, organizadas por ramo."
                                 )
                                 st.rerun()
                     except Exception as e:
