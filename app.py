@@ -24,6 +24,7 @@ load_dotenv()
 
 st.set_page_config(page_title="CRM Seguros", page_icon="📋", layout="wide")
 db.init_db()
+db.actualizar_polizas_vencidas()
 
 st.markdown(
     """
@@ -447,7 +448,7 @@ elif pagina == "📥 Cargar Póliza":
                         "pdf_path": str(pdf_path),
                     }
 
-                    similar = db.buscar_poliza_activa_similar(cliente_id, riesgo_patente, numero_poliza)
+                    similar = db.buscar_poliza_activa_similar(cliente_id, riesgo_patente, numero_poliza, ramo)
                     if similar and similar["vigencia_hasta"] != vigencia_hasta:
                         datos_poliza_pendiente["poliza_similar_id"] = similar["id"]
                         datos_poliza_pendiente["poliza_similar_info"] = (
@@ -537,6 +538,28 @@ elif pagina == "👥 Clientes":
                     )
                     st.success(f"Cliente '{nuevo_nombre}' guardado. Después le podés cargar pólizas cuando quieras.")
                     st.rerun()
+
+    with st.expander("📧 Exportar contactos (para mail o mensaje masivo)"):
+        st.caption(
+            "Listas de emails y teléfonos de todos tus clientes, listas para copiar "
+            "(con el ícono de copiar que aparece al pasar el mouse) y pegar en el campo "
+            "CCO de tu mail, o donde las necesites."
+        )
+        emails_todos, telefonos_todos = db.obtener_contactos_para_exportar()
+
+        tab_email, tab_tel = st.tabs(["✉️ Emails", "📞 Teléfonos"])
+        with tab_email:
+            if emails_todos:
+                st.caption(f"{len(emails_todos)} email(s)")
+                st.code(", ".join(emails_todos), language=None)
+            else:
+                st.caption("Todavía no hay emails cargados.")
+        with tab_tel:
+            if telefonos_todos:
+                st.caption(f"{len(telefonos_todos)} teléfono(s)")
+                st.code(", ".join(telefonos_todos), language=None)
+            else:
+                st.caption("Todavía no hay teléfonos cargados.")
 
     busqueda = st.text_input("Buscar por nombre o CUIT/DNI")
     clientes = db.listar_clientes(busqueda)

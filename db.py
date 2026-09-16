@@ -1076,16 +1076,20 @@ def eliminar_nota_ramo(nota_id):
     conn.close()
 
 
-def buscar_poliza_activa_similar(cliente_id, riesgo_patente, numero_poliza):
+def buscar_poliza_activa_similar(cliente_id, riesgo_patente, numero_poliza, ramo=None):
     """
-    Busca si el cliente ya tiene una póliza ACTIVA con el mismo riesgo/patente
-    o el mismo número de póliza, para detectar que una carga nueva es en
-    realidad la renovación de esa misma cobertura (mismo vehículo, por
-    ejemplo) y así evitar duplicarla como si fuera una póliza distinta.
+    Busca si el cliente ya tiene una póliza ACTIVA que probablemente sea la
+    misma cobertura, para detectar renovaciones y evitar duplicados:
+    - mismo riesgo/patente, o
+    - mismo número de póliza, o
+    - mismo ramo, cuando la nueva carga no tiene riesgo/patente (típico de
+      Vida, Vida Obligatorio, ART: no hay "patente" y el número de póliza
+      suele cambiar en cada renovación anual, así que ahí se compara por ramo).
     """
     riesgo_patente = (riesgo_patente or "").strip()
     numero_poliza = (numero_poliza or "").strip()
-    if not riesgo_patente and not numero_poliza:
+    ramo = (ramo or "").strip()
+    if not riesgo_patente and not numero_poliza and not ramo:
         return None
 
     conn = get_connection()
@@ -1098,6 +1102,16 @@ def buscar_poliza_activa_similar(cliente_id, riesgo_patente, numero_poliza):
     if numero_poliza:
         condiciones.append("TRIM(COALESCE(numero_poliza, '')) = %s")
         parametros.append(numero_poliza)
+    if ramo and not riesgo_patente:
+        condiciones.append(
+            "(TRIM(COALESCE(riesgo_patente, '')) = '' AND UPPER(TRIM(COALESCE(ramo, ''))) = UPPER(%s))"
+        )
+        parametros.append(ramo)
+
+    if not condiciones:
+        cur.close()
+        conn.close()
+        return None
 
     cur.execute(
         f"""SELECT * FROM polizas
@@ -1109,3 +1123,43 @@ def buscar_poliza_activa_similar(cliente_id, riesgo_patente, numero_poliza):
     cur.close()
     conn.close()
     return dict(row) if row else None
+
+
+def actualizar_polizas_vencidas():
+    """
+    Pasa a estado 'Vencida' cualquier póliza que siga marcada 'Activa' en la
+    base pero cuya fecha de vigencia_hasta ya pasó. Se corre cada vez que
+    arranca la app, para que el estado guardado no quede desactualizado
+    aunque nadie la haya tocado a mano.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    hoy = date.today().strftime("%Y-%m-%d")
+    cur.execute(
+        """UPDATE polizas SET estado = 'Vencida'
+           WHERE estado = 'Activa' AND vigencia_hasta IS NOT NULL AND vigencia_hasta < %s""",
+        (hoy,),
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def obtener_contactos_para_exportar():
+    """Devuelve listas de emails y teléfonos de clientes (sin vacíos ni duplicados),
+    listas para copiar y pegar en un envío masivo de mail o mensajes."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT email, telefono FROM clientes ORDER BY nombre_razon_social")
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    emails = []
+    telefonos = []
+    for r in rows:
+        if r["email"] and r["email"].strip() and r["email"].strip() not in emails:
+            emails.append(r["email"].strip())
+        if r["telefono"] and r["telefono"].strip() and r["telefono"].strip() not in telefonos:
+            telefonos.append(r["telefono"].strip())
+    return emails, telefonos
